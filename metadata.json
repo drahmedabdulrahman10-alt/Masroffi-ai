@@ -1,0 +1,6 @@
+{
+  "name": "Masroofi AI",
+  "description": "Personal finance and smart expense tracker with Egyptian Arabic and English multi-transaction AI & voice entry.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,6 @@
+{
+  "summary":  "Comprehensive architectural and UX implementation plan for Masroofi AI (مصروفي), a native RTL Arabic personal finance and AI multi-transaction expense tracker for Android built with Kotlin, Jetpack Compose, Material 3, Room, DataStore, Android Keystore, SpeechRecognizer, and Gemini/OpenRouter AI provider abstraction.",
+  "updatedAt":  "2026-11-01T19:38:47.155295796Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

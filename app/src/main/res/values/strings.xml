@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Masroofi AI</string>
+    <string name="app_title_ar">مصروفي الذكي</string>
+    <string name="nav_home">الرئيسية</string>
+    <string name="nav_transactions">المعاملات</string>
+    <string name="nav_reports">التقارير</string>
+    <string name="nav_settings">الإعدادات</string>
+    <string name="current_balance">الرصيد الحالي</string>
+    <string name="monthly_income">دخل الشهر</string>
+    <string name="monthly_expenses">مصروفات الشهر</string>
+    <string name="remaining_budget">المتبقي من الميزانية</string>
+    <string name="add_expense">إضافة مصروف</string>
+    <string name="add_income">إضافة دخل</string>
+    <string name="ai_entry_button">إدخال ذكي بالـ AI</string>
+    <string name="smart_summary">ملخص ذكي</string>
+    <string name="uncategorized">غير مصنف</string>
+    <string name="error_invalid_amount">يرجى إدخال مبلغ صحيح أكبر من الصفر</string>
+    <string name="error_missing_description">يرجى إدخال وصف المعاملة</string>
+</resources>
