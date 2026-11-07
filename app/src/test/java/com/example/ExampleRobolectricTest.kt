@@ -21,10 +21,12 @@ import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.backup.BackupExportManager
+import com.example.data.backup.BackupPayload
 import com.example.data.local.CategoryEntity
 import com.example.data.local.DefaultCategories
 import com.example.data.local.MasroofiDatabase
 import com.example.data.local.RefundAccountingMode
+import com.example.data.local.TransactionEntity
 import com.example.data.local.TransactionType
 import com.example.data.preferences.AppPreferencesRepository
 import com.example.data.preferences.KeyCipherEngine
@@ -38,14 +40,18 @@ import com.example.ui.MasroofiApp
 import com.example.ui.speech.MasroofiSpeechHelper
 import com.example.ui.speech.SpeechRecognitionState
 import com.example.ui.viewmodel.MasroofiViewModel
+import com.example.ui.viewmodel.TransactionHistoryFilter
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -482,5 +488,377 @@ class ExampleRobolectricTest {
         lifecycleOwner.registry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
         assertFalse(latestState.isListening)
         lifecycleOwner.lifecycle.removeObserver(helper)
+    }
+
+    // --- Task 3 Regression Tests ---
+
+    @Test
+    fun `editing USD and SAR transactions while app default is EGP preserves their original currencies (REV-03A)`() {
+        val (usdTx, sarTx) = runBlocking {
+            prefsRepository.setCurrency("EGP")
+            assertEquals("EGP", prefsRepository.getSnapshot().currencyCode)
+
+            val createdUsd = repository.saveManualTransaction(
+                description = "اشتراك خدمة سحابية",
+                amountMinorUnits = 10_000L, // 100.00 USD
+                currencyCode = "USD",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_BILLS,
+                transactionDate = 1730500000000L,
+                notes = "USD subscription"
+            ).getOrThrow()
+            assertEquals("USD", createdUsd.currencyCode)
+
+            val createdSar = repository.saveManualTransaction(
+                description = "مشتريات من الرياض",
+                amountMinorUnits = 25_000L, // 250.00 SAR
+                currencyCode = "SAR",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_FOOD,
+                transactionDate = 1730510000000L,
+                notes = "SAR purchase"
+            ).getOrThrow()
+            assertEquals("SAR", createdSar.currencyCode)
+            createdUsd to createdSar
+        }
+
+        // 2. Edit the USD transaction through MasroofiViewModel while app default is EGP
+        val viewModel = createTestViewModel(
+            defaultDispatcher = Dispatchers.Main,
+            ioDispatcher = Dispatchers.Main
+        )
+        awaitMainLooperCondition {
+            viewModel.uiState.value.allTransactions.size == 2
+        }
+
+        viewModel.saveManualTransaction(
+            existingId = usdTx.id,
+            description = "اشتراك خدمة سحابية - معدل",
+            amountText = "100",
+            type = TransactionType.EXPENSE,
+            categoryId = DefaultCategories.CAT_EDUCATION,
+            isoDate = "2026-11-02",
+            notes = "Edited while default is EGP"
+        )
+        awaitMainLooperCondition {
+            viewModel.uiState.value.allTransactions.any {
+                it.id == usdTx.id && it.description == "اشتراك خدمة سحابية - معدل"
+            }
+        }
+
+        val reloadedUsd = runBlocking { database.dao().getTransactionById(usdTx.id)!! }
+        assertEquals("USD", reloadedUsd.currencyCode)
+        assertEquals(10_000L, reloadedUsd.amountMinorUnits)
+        assertEquals(DefaultCategories.CAT_EDUCATION, reloadedUsd.categoryId)
+
+        // 3. Edit the SAR transaction through ViewModel while app default is still EGP
+        viewModel.saveManualTransaction(
+            existingId = sarTx.id,
+            description = "عشاء في الرياض - معدل",
+            amountText = "250",
+            type = TransactionType.EXPENSE,
+            categoryId = DefaultCategories.CAT_FOOD,
+            isoDate = "2026-11-02",
+            notes = "SAR kept"
+        )
+        awaitMainLooperCondition {
+            viewModel.uiState.value.allTransactions.any {
+                it.id == sarTx.id && it.description == "عشاء في الرياض - معدل"
+            }
+        }
+
+        val reloadedSar = runBlocking { database.dao().getTransactionById(sarTx.id)!! }
+        assertEquals("SAR", reloadedSar.currencyCode)
+        assertEquals(25_000L, reloadedSar.amountMinorUnits)
+    }
+
+    @Test
+    fun `backup and restore preserves opening balances for all configured currencies and supports legacy backups (REV-03B)`() = runBlocking {
+        // Configure opening balances for EGP, USD, and SAR
+        prefsRepository.setCurrency("EGP")
+        prefsRepository.setOpeningBalance(400_000L) // 4000 EGP
+        prefsRepository.setCurrency("USD")
+        prefsRepository.setOpeningBalance(150_000L) // 1500 USD
+        prefsRepository.setCurrency("SAR")
+        prefsRepository.setOpeningBalance(80_000L)  // 800 SAR
+        prefsRepository.setCurrency("EGP") // Default back to EGP
+
+        val exportedJson = repository.createBackupJson()
+        val preview = BackupExportManager.validateAndPreviewBackupJson(exportedJson)
+        assertTrue(preview.isValid)
+        val payload = preview.payload!!
+        assertEquals(400_000L, payload.currencyOpeningBalances["EGP"])
+        assertEquals(150_000L, payload.currencyOpeningBalances["USD"])
+        assertEquals(80_000L, payload.currencyOpeningBalances["SAR"])
+
+        // Wipe/change balances and restore via REPLACE_ALL
+        prefsRepository.setCurrency("EGP")
+        prefsRepository.setOpeningBalance(10_000L)
+        prefsRepository.setCurrency("USD")
+        prefsRepository.setOpeningBalance(10_000L)
+        prefsRepository.setCurrency("AED")
+        prefsRepository.setOpeningBalance(99_000L)
+
+        val restoreRes = repository.applyValidatedBackup(payload, RestoreMode.REPLACE_ALL)
+        assertTrue(restoreRes.isSuccess)
+
+        val restoredSnap = prefsRepository.getSnapshot()
+        assertEquals("EGP", restoredSnap.currencyCode)
+        assertEquals(400_000L, restoredSnap.openingBalanceMinorUnits)
+        assertEquals(400_000L, restoredSnap.configuredOpeningBalances["EGP"])
+        assertEquals(150_000L, restoredSnap.configuredOpeningBalances["USD"])
+        assertEquals(80_000L, restoredSnap.configuredOpeningBalances["SAR"])
+        assertFalse(restoredSnap.configuredOpeningBalances.containsKey("AED"))
+
+        // Verify switching to USD and SAR shows their restored opening balances
+        prefsRepository.setCurrency("USD")
+        assertEquals(150_000L, prefsRepository.getSnapshot().openingBalanceMinorUnits)
+        prefsRepository.setCurrency("SAR")
+        assertEquals(80_000L, prefsRepository.getSnapshot().openingBalanceMinorUnits)
+
+        // Verify restoring a legacy single-balance backup (without currencyOpeningBalances map) works
+        val legacyBackupJson = """
+            {
+              "format": "masroofi_backup_v1",
+              "schemaVersion": 1,
+              "exportedAtMillis": 1730500000000,
+              "settings": {
+                "currencyCode": "EUR",
+                "openingBalanceMinorUnits": 65000,
+                "openingBalanceConfigured": true,
+                "refundAccountingMode": "EXPENSE_OFFSET"
+              },
+              "categories": [],
+              "transactions": [],
+              "budgets": [],
+              "categoryRules": []
+            }
+        """.trimIndent()
+        val legacyPreview = BackupExportManager.validateAndPreviewBackupJson(legacyBackupJson)
+        assertTrue(legacyPreview.isValid)
+        repository.applyValidatedBackup(legacyPreview.payload!!, RestoreMode.REPLACE_ALL)
+        val afterLegacy = prefsRepository.getSnapshot()
+        assertEquals("EUR", afterLegacy.currencyCode)
+        assertEquals(65_000L, afterLegacy.openingBalanceMinorUnits)
+        assertTrue(afterLegacy.openingBalanceConfigured)
+    }
+
+    @Test
+    fun `history filters do not compare minMinor and maxMinor across different currencies (REV-03C)`() {
+        runBlocking {
+            prefsRepository.setCurrency("EGP")
+            repository.saveManualTransaction(
+                description = "فاتورة مصرية",
+                amountMinorUnits = 15_000L, // 150 EGP
+                currencyCode = "EGP",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_BILLS,
+                transactionDate = 1730500000000L,
+                notes = ""
+            ).getOrThrow()
+            repository.saveManualTransaction(
+                description = "اشتراك دولاري",
+                amountMinorUnits = 15_000L, // 150 USD (same minor units, different currency)
+                currencyCode = "USD",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_BILLS,
+                transactionDate = 1730510000000L,
+                notes = ""
+            ).getOrThrow()
+        }
+
+        val viewModel = createTestViewModel(
+            defaultDispatcher = Dispatchers.Main,
+            ioDispatcher = Dispatchers.Main
+        )
+        awaitMainLooperCondition {
+            viewModel.uiState.value.allTransactions.size == 2
+        }
+
+        // Without min/max amount filter, both transactions appear in history
+        assertEquals(2, viewModel.uiState.value.filteredHistoryTransactions.size)
+
+        // With minAmountText = "100" and default currency = "EGP", only the EGP transaction may match
+        viewModel.updateHistoryFilter(TransactionHistoryFilter(minAmountText = "100"))
+        awaitMainLooperCondition {
+            viewModel.uiState.value.filteredHistoryTransactions.size == 1
+        }
+        val egpFiltered = viewModel.uiState.value.filteredHistoryTransactions
+        assertEquals(1, egpFiltered.size)
+        assertEquals("EGP", egpFiltered[0].currencyCode)
+
+        // When filtering explicitly by USD with minAmountText = "100", only the USD transaction matches
+        viewModel.updateHistoryFilter(
+            TransactionHistoryFilter(
+                selectedCurrencyCode = "USD",
+                minAmountText = "100"
+            )
+        )
+        awaitMainLooperCondition {
+            viewModel.uiState.value.filteredHistoryTransactions.size == 1 &&
+                viewModel.uiState.value.filteredHistoryTransactions[0].currencyCode == "USD"
+        }
+        assertEquals("USD", viewModel.uiState.value.filteredHistoryTransactions[0].currencyCode)
+    }
+
+    @Test
+    fun `Keystore reads in AI flows execute deterministically on ioDispatcher and never on Main (REV-01)`() = runBlocking {
+        val activeIoDispatches = AtomicInteger(0)
+        val decryptCallsTotal = AtomicInteger(0)
+        val decryptCallsOnIoDispatcher = AtomicInteger(0)
+
+        val trackingIoDispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                activeIoDispatches.incrementAndGet()
+                try {
+                    block.run()
+                } finally {
+                    activeIoDispatches.decrementAndGet()
+                }
+            }
+        }
+
+        val spyCipherEngine = object : KeyCipherEngine {
+            override fun encrypt(plainText: String): String = "GCM:iv:$plainText"
+            override fun decrypt(payload: String): String? {
+                decryptCallsTotal.incrementAndGet()
+                if (activeIoDispatches.get() > 0) {
+                    decryptCallsOnIoDispatcher.incrementAndGet()
+                }
+                return payload.removePrefix("GCM:iv:")
+            }
+        }
+
+        val spyKeyStorage = SecureKeyStorage(context, spyCipherEngine)
+        spyKeyStorage.saveApiKey(SecureKeyStorage.KEY_GEMINI_API, "AIzaTestKeyForDispatcherCheck")
+
+        val spyDataStore = PreferenceDataStoreFactory.create(
+            scope = dataStoreScope,
+            produceFile = { File(context.cacheDir, "spy_prefs_${UUID.randomUUID()}.preferences_pb") }
+        )
+        val spyPrefsRepo = AppPreferencesRepository(
+            context = context,
+            secureKeyStorage = spyKeyStorage,
+            dataStore = spyDataStore
+        )
+
+        val stubAiClient = object : AiProviderClient {
+            override suspend fun requestStructuredTransactionsJson(
+                userText: String,
+                todayIsoDate: String,
+                defaultCurrency: String,
+                eligibleCategories: List<CategoryEntity>
+            ): Result<String> {
+                return Result.success(
+                    """
+                    {
+                      "transactions": [
+                        {
+                          "description": "قهوة",
+                          "amount": "25.00",
+                          "currency": "EGP",
+                          "type": "EXPENSE",
+                          "date": "2026-11-01",
+                          "categoryId": "${DefaultCategories.CAT_FOOD}",
+                          "notes": "",
+                          "confidence": 0.95
+                        }
+                      ],
+                      "needsClarification": false,
+                      "clarificationQuestion": null
+                    }
+                    """.trimIndent()
+                )
+            }
+
+            override suspend fun requestSmartSummaryText(aggregatedFactsArabic: String): Result<String> {
+                return Result.success("ملخص ذكي تجريبي")
+            }
+
+            override suspend fun testConnection(): Result<String> {
+                return Result.success("Connected")
+            }
+        }
+
+        val trackedRepo = FinanceRepository(
+            dao = database.dao(),
+            preferencesRepository = spyPrefsRepo,
+            customAiClientOverride = stubAiClient,
+            ioDispatcher = trackingIoDispatcher,
+            defaultDispatcher = Dispatchers.Unconfined
+        )
+
+        // In Robolectric, runBlocking executes on the Android Main Thread (Looper.getMainLooper().thread).
+        // Verify we start on the Main thread and that Keystore decrypt still executes via trackingIoDispatcher.
+        assertEquals(Looper.getMainLooper().thread, Thread.currentThread())
+        val parseRes = trackedRepo.parseMultiTransactionsWithAi(
+            userText = "قهوة 25 جنيه",
+            todayIsoDate = "2026-11-01",
+            useLocalParserOnly = false
+        )
+        assertTrue(parseRes.isSuccess)
+
+        val summaryRes = trackedRepo.generateSmartSummary("إجمالي المصروفات: 25 ج.م")
+        assertTrue(summaryRes.isSuccess)
+
+        assertEquals(2, decryptCallsTotal.get())
+        assertEquals(2, decryptCallsOnIoDispatcher.get())
+    }
+
+    @Test
+    fun `failed or corrupted backup restoration leaves existing Room transactions and categories intact (REV-12)`() = runBlocking {
+        val originalCategoriesCount = database.dao().getAllCategories().size
+        val savedTx = repository.saveManualTransaction(
+            description = "معاملة أصلية محمية",
+            amountMinorUnits = 75_000L, // 750 EGP
+            currencyCode = "EGP",
+            type = TransactionType.EXPENSE,
+            categoryId = DefaultCategories.CAT_FOOD,
+            transactionDate = 1730500000000L,
+            notes = "Must survive failed restore"
+        ).getOrThrow()
+
+        // 1. Corrupted JSON rejected by pre-validation leaves Room untouched
+        val corruptedJson = """{"format":"masroofi_backup_v1","settings":{"currencyCode":"EGP"},"transactions":[{"id":"bad","description":"","amountMinorUnits":-50}]}"""
+        val preview = BackupExportManager.validateAndPreviewBackupJson(corruptedJson)
+        assertFalse(preview.isValid)
+        assertEquals(1, database.dao().getAllTransactions().size)
+        assertEquals(originalCategoriesCount, database.dao().getAllCategories().size)
+
+        // 2. Direct applyValidatedBackup with a payload that fails inside @Transaction replaceAllDataTransaction
+        // (e.g. transaction referencing a non-existent category foreign key / invalid amount after deleteAllTransactions)
+        val corruptedPayload = BackupPayload(
+            schemaVersion = 2,
+            exportedAtMillis = 1730500000000L,
+            currencyCode = "EGP",
+            openingBalanceMinorUnits = 0L,
+            openingBalanceConfigured = false,
+            refundAccountingMode = RefundAccountingMode.EXPENSE_OFFSET,
+            categories = DefaultCategories.all(),
+            transactions = listOf(
+                TransactionEntity(
+                    id = "corrupt_tx",
+                    description = "معاملة تالفة",
+                    amountMinorUnits = 5000L,
+                    currencyCode = "EGP",
+                    type = TransactionType.EXPENSE,
+                    categoryId = "non_existent_category_fk",
+                    transactionDate = 1730500000000L
+                )
+            ),
+            budgets = emptyList(),
+            categoryRules = emptyList()
+        )
+
+        val restoreAttempt = repository.applyValidatedBackup(corruptedPayload, RestoreMode.REPLACE_ALL)
+        assertTrue(restoreAttempt.isFailure)
+
+        // Verify SQLite rolled back deleteAllTransactions() and deleteAllCategories()
+        val remainingTxs = database.dao().getAllTransactions()
+        assertEquals(1, remainingTxs.size)
+        assertEquals(savedTx.id, remainingTxs[0].id)
+        assertEquals("معاملة أصلية محمية", remainingTxs[0].description)
+        assertEquals(75_000L, remainingTxs[0].amountMinorUnits)
+        assertEquals(originalCategoriesCount, database.dao().getAllCategories().size)
     }
 }

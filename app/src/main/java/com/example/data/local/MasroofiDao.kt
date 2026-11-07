@@ -143,6 +143,20 @@ interface MasroofiDao {
         deleteAllBudgets()
         deleteAllCategoryRules()
         deleteAllCategories()
+        val categoryIds = categories.map { it.id }.toSet()
+        for (cat in categories) {
+            require(cat.id.isNotBlank() && cat.name.isNotBlank()) {
+                "تصنيف غير صالح أثناء استعادة النسخة الاحتياطية"
+            }
+        }
+        for (tx in transactions) {
+            require(tx.id.isNotBlank() && tx.description.isNotBlank() && tx.amountMinorUnits > 0L) {
+                "معاملة غير صالحة أو تالفة أثناء استعادة النسخة الاحتياطية"
+            }
+            require(tx.categoryId == null || categoryIds.contains(tx.categoryId)) {
+                "تصنيف المعاملة غير موجود في النسخة الاحتياطية (${tx.categoryId})"
+            }
+        }
         upsertCategories(categories)
         insertTransactions(transactions)
         insertBudgets(budgets)
@@ -156,6 +170,16 @@ interface MasroofiDao {
         budgets: List<BudgetEntity>,
         rules: List<CategoryRuleEntity>
     ) {
+        for (cat in categories) {
+            require(cat.id.isNotBlank() && cat.name.isNotBlank()) {
+                "تصنيف غير صالح أثناء دمج النسخة الاحتياطية"
+            }
+        }
+        for (tx in transactions) {
+            require(tx.id.isNotBlank() && tx.description.isNotBlank() && tx.amountMinorUnits > 0L) {
+                "معاملة غير صالحة أو تالفة أثناء دمج النسخة الاحتياطية"
+            }
+        }
         upsertCategories(categories)
         insertTransactions(transactions)
         insertBudgets(budgets)

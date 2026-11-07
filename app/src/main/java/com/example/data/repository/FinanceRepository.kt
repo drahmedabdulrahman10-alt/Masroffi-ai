@@ -19,7 +19,11 @@ import com.example.domain.ai.AiServiceException
 import com.example.domain.ai.EgyptianArabicLocalParser
 import com.example.domain.ai.ProposedTransactionDraft
 import com.example.domain.ai.RemoteAiProviderClient
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import java.util.UUID
 
@@ -35,7 +39,9 @@ enum class RestoreMode {
 class FinanceRepository(
     private val dao: MasroofiDao,
     val preferencesRepository: AppPreferencesRepository,
-    private val customAiClientOverride: AiProviderClient? = null
+    private val customAiClientOverride: AiProviderClient? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
 
     val allCategoriesFlow: Flow<List<CategoryEntity>> = dao.observeAllCategories()
@@ -65,6 +71,8 @@ class FinanceRepository(
 
     /**
      * Validates and saves a manual transaction with duplicate-submission protection.
+     * When editing an existing transaction (existingId != null), preserves its original
+     * currencyCode unless preserveExistingCurrency is explicitly set to false.
      */
     suspend fun saveManualTransaction(
         existingId: String? = null,
@@ -76,6 +84,7 @@ class FinanceRepository(
         transactionDate: Long,
         notes: String,
         isRefundOffset: Boolean = false,
+        preserveExistingCurrency: Boolean = true,
         nowMillis: Long = System.currentTimeMillis()
     ): Result<TransactionEntity> {
         val cleanDesc = description.trim()
@@ -112,11 +121,16 @@ class FinanceRepository(
                     transactionType = type
                 )
             }
+            val effectiveCurrency = if (preserveExistingCurrency && prev != null) {
+                prev.currencyCode
+            } else {
+                currencyCode
+            }
             TransactionEntity(
                 id = existingId,
                 description = cleanDesc,
                 amountMinorUnits = amountMinorUnits,
-                currencyCode = currencyCode,
+                currencyCode = effectiveCurrency,
                 type = type,
                 categoryId = verifiedCategoryId,
                 transactionDate = transactionDate,
@@ -341,9 +355,21 @@ class FinanceRepository(
         todayIsoDate: String,
         useLocalParserOnly: Boolean = false
     ): Result<AiParseResult> {
-        val prefs = preferencesRepository.getSnapshot()
-        val activeCategories = dao.getActiveCategories()
-        val learnedRules = dao.getAllCategoryRules()
+        val (prefs, activeCategories, learnedRules, configuredApiKey) = withContext(ioDispatcher) {
+            val snapshot = preferencesRepository.getSnapshot()
+            val categories = dao.getActiveCategories()
+            val rules = dao.getAllCategoryRules()
+            val key = if (snapshot.aiEnabled && !useLocalParserOnly) {
+                val keyId = when (snapshot.selectedProvider) {
+                    AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
+                    AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
+                }
+                preferencesRepository.secureKeyStorage.getApiKey(keyId).trim()
+            } else {
+                ""
+            }
+            Quadruple(snapshot, categories, rules, key)
+        }
 
         if (!prefs.aiEnabled) {
             return Result.failure(
@@ -352,22 +378,19 @@ class FinanceRepository(
         }
 
         if (useLocalParserOnly) {
-            val localRes = EgyptianArabicLocalParser.parseNaturalText(
-                rawText = userText,
-                todayIsoDate = todayIsoDate,
-                defaultCurrency = prefs.currencyCode,
-                eligibleCategories = activeCategories,
-                learnedRules = learnedRules,
-                refundAccountingMode = prefs.refundAccountingMode
-            )
+            val localRes = withContext(defaultDispatcher) {
+                EgyptianArabicLocalParser.parseNaturalText(
+                    rawText = userText,
+                    todayIsoDate = todayIsoDate,
+                    defaultCurrency = prefs.currencyCode,
+                    eligibleCategories = activeCategories,
+                    learnedRules = learnedRules,
+                    refundAccountingMode = prefs.refundAccountingMode
+                )
+            }
             return Result.success(localRes)
         }
 
-        val keyId = when (prefs.selectedProvider) {
-            AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
-            AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
-        }
-        val configuredApiKey = preferencesRepository.secureKeyStorage.getApiKey(keyId).trim()
         val modelId = when (prefs.selectedProvider) {
             AiProviderType.GEMINI -> prefs.geminiModelId
             AiProviderType.OPENROUTER -> prefs.openRouterModelId
@@ -384,46 +407,60 @@ class FinanceRepository(
                 AiProviderType.GEMINI -> "Google Gemini ($modelId)"
                 AiProviderType.OPENROUTER -> "OpenRouter ($modelId)"
             }
-            val rawJsonResult = client.requestStructuredTransactionsJson(
-                userText = userText,
-                todayIsoDate = todayIsoDate,
-                defaultCurrency = prefs.currencyCode,
-                eligibleCategories = activeCategories
-            )
+            val rawJsonResult = withContext(ioDispatcher) {
+                client.requestStructuredTransactionsJson(
+                    userText = userText,
+                    todayIsoDate = todayIsoDate,
+                    defaultCurrency = prefs.currencyCode,
+                    eligibleCategories = activeCategories
+                )
+            }
             return rawJsonResult.fold(
                 onSuccess = { rawJson ->
-                    EgyptianArabicLocalParser.validateAndMapAiJsonResponse(
-                        rawJsonResponse = rawJson,
-                        todayIsoDate = todayIsoDate,
-                        defaultCurrency = prefs.currencyCode,
-                        eligibleCategories = activeCategories,
-                        learnedRules = learnedRules,
-                        providerLabel = providerLabel,
-                        refundAccountingMode = prefs.refundAccountingMode
-                    )
+                    withContext(defaultDispatcher) {
+                        EgyptianArabicLocalParser.validateAndMapAiJsonResponse(
+                            rawJsonResponse = rawJson,
+                            todayIsoDate = todayIsoDate,
+                            defaultCurrency = prefs.currencyCode,
+                            eligibleCategories = activeCategories,
+                            learnedRules = learnedRules,
+                            providerLabel = providerLabel,
+                            refundAccountingMode = prefs.refundAccountingMode
+                        )
+                    }
                 },
                 onFailure = { err ->
+                    if (err is CancellationException) throw err
                     Result.failure(err)
                 }
             )
         }
 
         // When no remote API key is configured yet, use the deterministic local Egyptian Arabic parser
-        val localResult = EgyptianArabicLocalParser.parseNaturalText(
-            rawText = userText,
-            todayIsoDate = todayIsoDate,
-            defaultCurrency = prefs.currencyCode,
-            eligibleCategories = activeCategories,
-            learnedRules = learnedRules,
-            refundAccountingMode = prefs.refundAccountingMode
-        )
+        val localResult = withContext(defaultDispatcher) {
+            EgyptianArabicLocalParser.parseNaturalText(
+                rawText = userText,
+                todayIsoDate = todayIsoDate,
+                defaultCurrency = prefs.currencyCode,
+                eligibleCategories = activeCategories,
+                learnedRules = learnedRules,
+                refundAccountingMode = prefs.refundAccountingMode
+            )
+        }
         return Result.success(localResult)
     }
 
-    suspend fun generateSmartSummary(aggregatedFactsArabic: String): Result<String> {
+    private data class Quadruple<A, B, C, D>(
+        val first: A,
+        val second: B,
+        val third: C,
+        val fourth: D
+    )
+
+    suspend fun generateSmartSummary(aggregatedFactsArabic: String): Result<String> = withContext(ioDispatcher) {
         val prefs = preferencesRepository.getSnapshot()
         if (!prefs.aiEnabled || !prefs.aiSummaryEnabled) {
-            return Result.failure(IllegalStateException("ميزة الملخص الذكي غير مفعلة في الإعدادات."))
+            return@withContext Result.failure(IllegalStateException("ميزة الملخص الذكي غير مفعلة في الإعدادات."))
         }
         val keyId = when (prefs.selectedProvider) {
             AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
@@ -441,10 +478,10 @@ class FinanceRepository(
                 apiKeyProvider = { apiKey },
                 modelIdProvider = { modelId }
             )
-            return client.requestSmartSummaryText(aggregatedFactsArabic)
+            return@withContext client.requestSmartSummaryText(aggregatedFactsArabic)
         }
 
-        return Result.success(
+        Result.success(
             "ملخص محلي محسوب من سجلاتك:\n$aggregatedFactsArabic\n(أضف مفتاح API في الإعدادات للحصول على صياغة تحليلية إضافية عبر الذكاء الاصطناعي)."
         )
     }
@@ -453,13 +490,13 @@ class FinanceRepository(
         provider: AiProviderType,
         apiKey: String,
         modelId: String
-    ): Result<String> {
+    ): Result<String> = withContext(ioDispatcher) {
         val client = customAiClientOverride ?: RemoteAiProviderClient(
             providerType = provider,
             apiKeyProvider = { apiKey.trim() },
             modelIdProvider = { modelId.trim() }
         )
-        return client.testConnection()
+        client.testConnection()
     }
 
     // --- Backup & Restore ---
@@ -479,7 +516,8 @@ class FinanceRepository(
             categories = categories,
             transactions = transactions,
             budgets = budgets,
-            categoryRules = rules
+            categoryRules = rules,
+            currencyOpeningBalances = prefs.configuredOpeningBalances
         )
     }
 
@@ -510,9 +548,13 @@ class FinanceRepository(
                 currencyCode = payload.currencyCode,
                 openingBalanceMinorUnits = payload.openingBalanceMinorUnits,
                 openingBalanceConfigured = payload.openingBalanceConfigured,
-                refundMode = payload.refundAccountingMode
+                refundMode = payload.refundAccountingMode,
+                currencyOpeningBalances = payload.currencyOpeningBalances,
+                replaceExistingBalances = (mode == RestoreMode.REPLACE_ALL)
             )
             Result.success(Unit)
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (e: Exception) {
             Result.failure(IllegalStateException("فشل استعادة النسخة الاحتياطية بأمان: ${e.message}"))
         }

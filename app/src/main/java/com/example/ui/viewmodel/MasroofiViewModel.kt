@@ -57,6 +57,7 @@ data class TransactionHistoryFilter(
     val searchQuery: String = "",
     val selectedType: TransactionType? = null,
     val selectedCategoryId: String? = null,
+    val selectedCurrencyCode: String? = null,
     val minAmountText: String = "",
     val maxAmountText: String = "",
     val startIsoDate: String = "",
@@ -272,7 +273,11 @@ class MasroofiViewModel(
             refundAccountingMode = prefs.refundAccountingMode
         )
 
-        val filteredHistory = applyHistoryFilters(transactions, filters.historyFilter)
+        val filteredHistory = applyHistoryFilters(
+            allTransactions = transactions,
+            filter = filters.historyFilter,
+            defaultCurrencyCode = prefs.currencyCode
+        )
 
         ComputedFinancials(
             preferences = prefs,
@@ -381,7 +386,10 @@ class MasroofiViewModel(
         }
 
         viewModelScope.launch {
-            val currencyCode = uiState.value.preferences.currencyCode
+            val existingCurrency = existingId?.let { id ->
+                uiState.value.allTransactions.firstOrNull { it.id == id }?.currencyCode
+            }
+            val currencyCode = existingCurrency ?: uiState.value.preferences.currencyCode
             val result = repository.saveManualTransaction(
                 existingId = existingId,
                 description = description,
@@ -391,7 +399,8 @@ class MasroofiViewModel(
                 categoryId = categoryId,
                 transactionDate = dateMillis,
                 notes = notes,
-                isRefundOffset = isRefundOffset
+                isRefundOffset = isRefundOffset,
+                preserveExistingCurrency = true
             )
             result.fold(
                 onSuccess = {
@@ -1035,13 +1044,16 @@ class MasroofiViewModel(
         }
     }
 
-    private fun applyHistoryFilters(
+    internal fun applyHistoryFilters(
         allTransactions: List<TransactionEntity>,
-        filter: TransactionHistoryFilter
+        filter: TransactionHistoryFilter,
+        defaultCurrencyCode: String = "EGP"
     ): List<TransactionEntity> {
         val query = filter.searchQuery.trim().lowercase()
         val minMinor = MoneyUtils.parseAmountToMinorUnits(filter.minAmountText)
         val maxMinor = MoneyUtils.parseAmountToMinorUnits(filter.maxAmountText)
+        val hasAmountBounds = minMinor != null || maxMinor != null
+        val targetAmountCurrency = (filter.selectedCurrencyCode ?: defaultCurrencyCode).trim()
         val startMillis = MoneyUtils.isoDateToEpochMillis(filter.startIsoDate)?.let {
             MoneyUtils.startOfDayMillis(it)
         }
@@ -1059,12 +1071,26 @@ class MasroofiViewModel(
                 "UNCATEGORIZED" -> tx.categoryId == null
                 else -> tx.categoryId == filter.selectedCategoryId
             }
-            val matchesMin = minMinor == null || tx.amountMinorUnits >= minMinor
-            val matchesMax = maxMinor == null || tx.amountMinorUnits <= maxMinor
+            val matchesSelectedCurrency = filter.selectedCurrencyCode == null ||
+                tx.currencyCode.equals(filter.selectedCurrencyCode, ignoreCase = true)
+            val matchesAmountCurrencyBasis = !hasAmountBounds ||
+                tx.currencyCode.equals(targetAmountCurrency, ignoreCase = true)
+            val matchesMin = minMinor == null ||
+                (matchesAmountCurrencyBasis && tx.amountMinorUnits >= minMinor)
+            val matchesMax = maxMinor == null ||
+                (matchesAmountCurrencyBasis && tx.amountMinorUnits <= maxMinor)
             val matchesStart = startMillis == null || tx.transactionDate >= startMillis
             val matchesEnd = endMillis == null || tx.transactionDate <= endMillis
 
-            matchesQuery && matchesType && matchesCat && matchesMin && matchesMax && matchesStart && matchesEnd
+            matchesQuery &&
+                matchesType &&
+                matchesCat &&
+                matchesSelectedCurrency &&
+                matchesAmountCurrencyBasis &&
+                matchesMin &&
+                matchesMax &&
+                matchesStart &&
+                matchesEnd
         }
     }
 

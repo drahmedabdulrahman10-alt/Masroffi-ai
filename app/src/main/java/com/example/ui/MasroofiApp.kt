@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.TransactionEntity
 import com.example.data.local.TransactionType
+import com.example.data.preferences.SupportedCurrencies
 import com.example.data.preferences.ThemePreference
 import com.example.ui.components.ConfirmDeleteDialog
 import com.example.ui.components.ManualTransactionDialog
@@ -310,11 +311,14 @@ fun MasroofiApp(
         }
 
         if (showManualDialog) {
+            val activeCurrencySymbol = editingTransaction?.let {
+                SupportedCurrencies.fromCode(it.currencyCode).symbol
+            } ?: uiState.preferences.currencySymbol
             ManualTransactionDialog(
                 initialType = manualDialogInitialType,
                 existingTransaction = editingTransaction,
                 categories = uiState.categories,
-                currencySymbol = uiState.preferences.currencySymbol,
+                currencySymbol = activeCurrencySymbol,
                 onDismiss = {
                     showManualDialog = false
                     editingTransaction = null

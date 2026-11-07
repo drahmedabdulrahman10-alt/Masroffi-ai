@@ -648,4 +648,172 @@ class ExampleUnitTest {
         val clientB = RemoteAiProviderClient.defaultOkHttpClient()
         assertSame(clientA, clientB)
     }
+
+    // --- F. Task 3 Regression Tests (REV-03, REV-10) ---
+
+    @Test
+    fun `arabic word amounts with USD, SAR, AED, EUR, and EGP parse accurately without false matches (REV-10)`() {
+        // 1. "دفعت عشرين دولار" -> 2000L, USD
+        val usdRes = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "دفعت عشرين دولار",
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(1, usdRes.proposals.size)
+        assertEquals(2000L, usdRes.proposals[0].amountMinorUnits)
+        assertEquals("USD", usdRes.proposals[0].currencyCode)
+
+        // 2. "اشتريت قهوة بخمسة عشر ريال" -> 1500L, SAR
+        val sarRes = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "اشتريت قهوة بخمسة عشر ريال",
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(1, sarRes.proposals.size)
+        assertEquals(1500L, sarRes.proposals[0].amountMinorUnits)
+        assertEquals("SAR", sarRes.proposals[0].currencyCode)
+        assertEquals(DefaultCategories.CAT_FOOD, sarRes.proposals[0].categoryId)
+
+        // 3. "دفعت مئة درهم" -> 10000L, AED
+        val aedRes = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "دفعت مئة درهم",
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(1, aedRes.proposals.size)
+        assertEquals(10_000L, aedRes.proposals[0].amountMinorUnits)
+        assertEquals("AED", aedRes.proposals[0].currencyCode)
+
+        // 4. "اشتريت كتاب بعشرين يورو" -> 2000L, EUR
+        val eurRes = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "اشتريت كتاب بعشرين يورو",
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(1, eurRes.proposals.size)
+        assertEquals(2000L, eurRes.proposals[0].amountMinorUnits)
+        assertEquals("EUR", eurRes.proposals[0].currencyCode)
+        assertEquals(DefaultCategories.CAT_EDUCATION, eurRes.proposals[0].categoryId)
+
+        // 5. "دفعت خمسين جنيه" -> 5000L, EGP
+        val egpRes = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "دفعت خمسين جنيه",
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "USD",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(1, egpRes.proposals.size)
+        assertEquals(5000L, egpRes.proposals[0].amountMinorUnits)
+        assertEquals("EGP", egpRes.proposals[0].currencyCode)
+
+        // 6. Currency word mentioned without an amount must NOT false-match
+        val noAmountRes = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "دفعت حساب الفندق بالدولار",
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(1, noAmountRes.proposals.size)
+        assertNull(noAmountRes.proposals[0].amountMinorUnits)
+        assertTrue(noAmountRes.proposals[0].isAmbiguous)
+
+        // 7. Existing numeric amount parsing with foreign currencies continues to work
+        val numericForeignRes = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "اشتريت كتاب بـ 35 دولار وقهوة 15 ريال",
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(2, numericForeignRes.proposals.size)
+        assertEquals(3500L, numericForeignRes.proposals[0].amountMinorUnits)
+        assertEquals("USD", numericForeignRes.proposals[0].currencyCode)
+        assertEquals(1500L, numericForeignRes.proposals[1].amountMinorUnits)
+        assertEquals("SAR", numericForeignRes.proposals[1].currencyCode)
+    }
+
+    @Test
+    fun `backup exports multiple currency opening balances, maintains backward compatibility with legacy backups, and rejects invalid currency entries (REV-03)`() {
+        val multiBalances = mapOf(
+            "EGP" to 500_000L,
+            "USD" to 120_000L,
+            "SAR" to 75_000L
+        )
+        val json = BackupExportManager.createBackupJsonString(
+            currencyCode = "EGP",
+            openingBalanceMinorUnits = 500_000L,
+            openingBalanceConfigured = true,
+            refundMode = RefundAccountingMode.EXPENSE_OFFSET,
+            categories = defaultCategories,
+            transactions = emptyList(),
+            budgets = emptyList(),
+            categoryRules = emptyList(),
+            currencyOpeningBalances = multiBalances
+        )
+
+        val preview = BackupExportManager.validateAndPreviewBackupJson(json)
+        assertTrue(preview.isValid)
+        val payload = preview.payload!!
+        assertEquals(3, payload.currencyOpeningBalances.size)
+        assertEquals(500_000L, payload.currencyOpeningBalances["EGP"])
+        assertEquals(120_000L, payload.currencyOpeningBalances["USD"])
+        assertEquals(75_000L, payload.currencyOpeningBalances["SAR"])
+
+        // Backward compatibility: older v1/v2 backup without currencyOpeningBalances object
+        val legacyJson = """
+            {
+              "format": "masroofi_backup_v1",
+              "schemaVersion": 1,
+              "exportedAtMillis": 1730500000000,
+              "settings": {
+                "currencyCode": "SAR",
+                "openingBalanceMinorUnits": 90000,
+                "openingBalanceConfigured": true,
+                "refundAccountingMode": "EXPENSE_OFFSET"
+              },
+              "categories": [],
+              "transactions": [],
+              "budgets": [],
+              "categoryRules": []
+            }
+        """.trimIndent()
+        val legacyPreview = BackupExportManager.validateAndPreviewBackupJson(legacyJson)
+        assertTrue(legacyPreview.isValid)
+        assertEquals("SAR", legacyPreview.payload?.currencyCode)
+        assertEquals(mapOf("SAR" to 90_000L), legacyPreview.payload?.currencyOpeningBalances)
+
+        // Unsupported currency in currencyOpeningBalances must be rejected safely
+        val unsupportedCurrencyJson = """
+            {
+              "format": "masroofi_backup_v1",
+              "schemaVersion": 2,
+              "exportedAtMillis": 1730500000000,
+              "settings": {
+                "currencyCode": "EGP",
+                "openingBalanceMinorUnits": 10000,
+                "openingBalanceConfigured": true,
+                "currencyOpeningBalances": {
+                  "EGP": 10000,
+                  "XYZ": 50000
+                }
+              },
+              "categories": [],
+              "transactions": [],
+              "budgets": [],
+              "categoryRules": []
+            }
+        """.trimIndent()
+        val invalidCurrPreview = BackupExportManager.validateAndPreviewBackupJson(unsupportedCurrencyJson)
+        assertFalse(invalidCurrPreview.isValid)
+    }
 }

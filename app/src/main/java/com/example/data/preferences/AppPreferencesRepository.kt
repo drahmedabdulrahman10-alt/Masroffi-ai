@@ -45,7 +45,10 @@ object SupportedCurrencies {
     val all = listOf(EGP, SAR, AED, USD, EUR)
 
     fun fromCode(code: String): SupportedCurrency =
-        all.firstOrNull { it.code.equals(code, ignoreCase = true) } ?: EGP
+        all.firstOrNull { it.code.equals(code.trim(), ignoreCase = true) } ?: EGP
+
+    fun fromCodeOrNull(code: String): SupportedCurrency? =
+        all.firstOrNull { it.code.equals(code.trim(), ignoreCase = true) }
 }
 
 data class AppPreferencesState(
@@ -53,6 +56,7 @@ data class AppPreferencesState(
     val currencySymbol: String = "ج.م",
     val openingBalanceMinorUnits: Long = 0L,
     val openingBalanceConfigured: Boolean = false,
+    val configuredOpeningBalances: Map<String, Long> = emptyMap(),
     val aiEnabled: Boolean = true,
     val selectedProvider: AiProviderType = AiProviderType.GEMINI,
     val geminiModelId: String = "gemini-2.5-flash",
@@ -124,11 +128,31 @@ class AppPreferencesRepository(
             else -> false
         }
 
+        val configuredBalancesMap = buildMap<String, Long> {
+            for (supported in SupportedCurrencies.all) {
+                val cKey = Keys.openingBalanceConfiguredForCurrency(supported.code)
+                val mKey = Keys.openingBalanceMinorForCurrency(supported.code)
+                when {
+                    prefs.contains(cKey) -> {
+                        if (prefs[cKey] == true) {
+                            put(supported.code, prefs[mKey] ?: 0L)
+                        }
+                    }
+                    supported.code.equals(legacyCurrency, ignoreCase = true) -> {
+                        if (prefs[Keys.OPENING_BALANCE_CONFIGURED] == true) {
+                            put(supported.code, prefs[Keys.OPENING_BALANCE_MINOR] ?: 0L)
+                        }
+                    }
+                }
+            }
+        }
+
         AppPreferencesState(
             currencyCode = currency.code,
             currencySymbol = currency.symbol,
             openingBalanceMinorUnits = openingBalanceMinor,
             openingBalanceConfigured = openingBalanceConfigured,
+            configuredOpeningBalances = configuredBalancesMap,
             aiEnabled = prefs[Keys.AI_ENABLED] ?: true,
             selectedProvider = provider,
             geminiModelId = prefs[Keys.GEMINI_MODEL_ID]?.takeIf { it.isNotBlank() }
@@ -218,15 +242,45 @@ class AppPreferencesRepository(
         currencyCode: String,
         openingBalanceMinorUnits: Long,
         openingBalanceConfigured: Boolean,
-        refundMode: RefundAccountingMode
+        refundMode: RefundAccountingMode,
+        currencyOpeningBalances: Map<String, Long> = emptyMap(),
+        replaceExistingBalances: Boolean = true
     ) {
         val valid = SupportedCurrencies.fromCode(currencyCode)
         dataStore.edit { prefs ->
+            if (replaceExistingBalances) {
+                for (supported in SupportedCurrencies.all) {
+                    prefs.remove(Keys.openingBalanceMinorForCurrency(supported.code))
+                    prefs.remove(Keys.openingBalanceConfiguredForCurrency(supported.code))
+                }
+            }
+
+            for ((rawCode, minor) in currencyOpeningBalances) {
+                val supported = SupportedCurrencies.fromCodeOrNull(rawCode) ?: continue
+                prefs[Keys.openingBalanceMinorForCurrency(supported.code)] = minor
+                prefs[Keys.openingBalanceConfiguredForCurrency(supported.code)] = true
+            }
+
+            // Backward compatibility for older backups that only exported a single opening balance
+            val hasEntryForActive = currencyOpeningBalances.keys.any {
+                it.equals(valid.code, ignoreCase = true)
+            }
+            if (!hasEntryForActive) {
+                if (openingBalanceConfigured) {
+                    prefs[Keys.openingBalanceMinorForCurrency(valid.code)] = openingBalanceMinorUnits
+                    prefs[Keys.openingBalanceConfiguredForCurrency(valid.code)] = true
+                } else if (replaceExistingBalances) {
+                    prefs[Keys.openingBalanceMinorForCurrency(valid.code)] = 0L
+                    prefs[Keys.openingBalanceConfiguredForCurrency(valid.code)] = false
+                }
+            }
+
+            val activeMinor = prefs[Keys.openingBalanceMinorForCurrency(valid.code)] ?: 0L
+            val activeConfigured = prefs[Keys.openingBalanceConfiguredForCurrency(valid.code)] ?: false
+
             prefs[Keys.CURRENCY_CODE] = valid.code
-            prefs[Keys.openingBalanceMinorForCurrency(valid.code)] = openingBalanceMinorUnits
-            prefs[Keys.openingBalanceConfiguredForCurrency(valid.code)] = openingBalanceConfigured
-            prefs[Keys.OPENING_BALANCE_MINOR] = openingBalanceMinorUnits
-            prefs[Keys.OPENING_BALANCE_CONFIGURED] = openingBalanceConfigured
+            prefs[Keys.OPENING_BALANCE_MINOR] = activeMinor
+            prefs[Keys.OPENING_BALANCE_CONFIGURED] = activeConfigured
             prefs[Keys.OPENING_BALANCE_CURRENCY] = valid.code
             prefs[Keys.REFUND_MODE] = refundMode.name
             prefs[Keys.CATEGORIES_SEEDED] = true

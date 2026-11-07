@@ -53,16 +53,26 @@ object EgyptianArabicLocalParser {
         "عشر" to 10.0,
         "حداشر" to 11.0,
         "أحد عشر" to 11.0,
+        "احد عشر" to 11.0,
         "اتناشر" to 12.0,
         "اثنا عشر" to 12.0,
         "تلتاشر" to 13.0,
+        "ثلاثة عشر" to 13.0,
+        "تلاتة عشر" to 13.0,
         "اربعتاشر" to 14.0,
+        "أربعة عشر" to 14.0,
+        "اربعة عشر" to 14.0,
         "خمستاشر" to 15.0,
         "خمسة عشر" to 15.0,
         "ستاشر" to 16.0,
+        "ستة عشر" to 16.0,
         "سبعتاشر" to 17.0,
+        "سبعة عشر" to 17.0,
         "تمنتاشر" to 18.0,
+        "ثمانية عشر" to 18.0,
+        "تمانية عشر" to 18.0,
         "تسعتاشر" to 19.0,
+        "تسعة عشر" to 19.0,
         "عشرين" to 20.0,
         "تلاتين" to 30.0,
         "ثلاثين" to 30.0,
@@ -116,11 +126,15 @@ object EgyptianArabicLocalParser {
     private val splitPattern = Regex(
         """(?<=(?:جنيه|ج\.م|ريال|ر\.س|دولار|درهم|د\.إ|يورو|قرش|EGP|USD|SAR|AED|EUR|\d))\s+(?:و\s*|كمان\s+|ثم\s+|،\s*)|(?:\s+و\s*(?=(?:اشتريت|دفعت|صرفت|ركبت|جبت|قبضت|حاسبت|شحنت|سددت)(?:\s|$)))"""
     )
+    private const val supportedCurrencySuffixPattern =
+        """(?:جنيه|ج\.م|جنية|ريال|ر\.س|دولار|درهم|د\.إ|يورو|\$|€|EGP|SAR|USD|AED|EUR)"""
+
     private val compoundRegex = Regex(
-        """(?:بـ?\s*)?(واحد|اتنين|اثنين|تلاتة|ثلاثة|اربعة|أربعة|خمسة|ستة|سبعة|تمانية|ثمانية|تسعة)\s+و\s*(عشرين|تلاتين|ثلاثين|اربعين|أربعين|خمسين|ستين|سبعين|تمانين|ثمانين|تسعين)(?:\s+ونص|\s+وربع)?(?:\s*(?:جنيه|ج\.م|ريال|ر\.س|دولار|درهم|د\.إ|يورو|EGP|SAR|USD|AED|EUR))?"""
+        """(?<=^|\s)(?:بـ?\s*)?(واحد|اتنين|اثنين|تلاتة|ثلاثة|اربعة|أربعة|خمسة|ستة|سبعة|تمانية|ثمانية|تسعة)\s+و\s*(عشرين|تلاتين|ثلاثين|اربعين|أربعين|خمسين|ستين|سبعين|تمانين|ثمانين|تسعين)(?:\s+ونص|\s+وربع)?(?:\s*$supportedCurrencySuffixPattern)?(?=\s|$|[،,.;؛])""",
+        RegexOption.IGNORE_CASE
     )
     private val explicitCurrencyNumericRegex = Regex(
-        """(?:بـ?\s*)?(\d+(?:\.\d{1,2})?)\s*(?:ونص|و\s*نص)?\s*(?:جنيه|ج\.م|جنية|ريال|ر\.س|دولار|درهم|د\.إ|يورو|\$|€|EGP|SAR|USD|AED|EUR)""",
+        """(?<=^|\s)(?:بـ?\s*)?(\d+(?:\.\d{1,2})?)\s*(?:ونص|و\s*نص)?\s*$supportedCurrencySuffixPattern(?=\s|$|[،,.;؛])""",
         RegexOption.IGNORE_CASE
     )
     private val singleWordKeysPattern = numberWordsMap.keys
@@ -128,7 +142,8 @@ object EgyptianArabicLocalParser {
         .sortedByDescending { it.length }
         .joinToString("|") { Regex.escape(it) }
     private val wordAmountRegex = Regex(
-        """(?:بـ?\s*($singleWordKeysPattern)(?:\s+ونص|\s+وربع)?(?:\s*(?:جنيه|ج\.م|جنية))?)|(?:($singleWordKeysPattern)(?:\s+ونص|\s+وربع)?\s*(?:جنيه|ج\.م|جنية))"""
+        """(?<=^|\s)(?:(?:بـ?\s*($singleWordKeysPattern)(?:\s+ونص|\s+وربع)?(?:\s*$supportedCurrencySuffixPattern)?)|(?:($singleWordKeysPattern)(?:\s+ونص|\s+وربع)?\s*$supportedCurrencySuffixPattern))(?=\s|$|[،,.;؛])""",
+        RegexOption.IGNORE_CASE
     )
     private val biNumberRegex = Regex("""بـ?\s*(\d+(?:\.\d{1,2})?)""")
     private val trailingOrStandaloneNumber = Regex("""(?:^|\s)(\d+(?:\.\d{1,2})?)(?:\s*$)""")
@@ -446,7 +461,7 @@ object EgyptianArabicLocalParser {
             }
         }
 
-        // 3. Single Arabic number word with 'بـ' or 'جنيه' (e.g. "بعشرين جنيه", "عشرين جنيه", "بعشرة جنيه")
+        // 3. Single Arabic number word with 'بـ' or supported currency (e.g. "بعشرين دولار", "عشرين دولار", "بخمسة عشر ريال")
         val wordMatch = wordAmountRegex.find(normalized)
         if (wordMatch != null) {
             val word = wordMatch.groupValues[1].ifEmpty { wordMatch.groupValues[2] }
@@ -461,6 +476,7 @@ object EgyptianArabicLocalParser {
                 return ExtractedAmount(
                     minorUnits = kotlin.math.round(total * 100).toLong(),
                     matchedSpan = wordMatch.value,
+                    currencyCode = detectCurrencyInSpan(wordMatch.value) ?: detectCurrencyInSpan(normalized),
                     fromWords = true
                 )
             }
@@ -473,7 +489,8 @@ object EgyptianArabicLocalParser {
             if (value > 0) {
                 return ExtractedAmount(
                     minorUnits = kotlin.math.round(value * 100).toLong(),
-                    matchedSpan = biMatch.value
+                    matchedSpan = biMatch.value,
+                    currencyCode = detectCurrencyInSpan(normalized)
                 )
             }
         }
@@ -485,7 +502,8 @@ object EgyptianArabicLocalParser {
             if (value > 0) {
                 return ExtractedAmount(
                     minorUnits = kotlin.math.round(value * 100).toLong(),
-                    matchedSpan = trailingMatch.value
+                    matchedSpan = trailingMatch.value,
+                    currencyCode = detectCurrencyInSpan(normalized)
                 )
             }
         }
@@ -500,7 +518,7 @@ object EgyptianArabicLocalParser {
             upper.contains("SAR") || span.contains("ريال") || span.contains("ر.س") -> "SAR"
             upper.contains("AED") || span.contains("درهم") || span.contains("د.إ") -> "AED"
             upper.contains("EUR") || span.contains("يورو") || span.contains("€") -> "EUR"
-            upper.contains("EGP") || span.contains("جنيه") || span.contains("ج.م") -> "EGP"
+            upper.contains("EGP") || span.contains("جنيه") || span.contains("جنية") || span.contains("ج.م") -> "EGP"
             else -> null
         }
     }

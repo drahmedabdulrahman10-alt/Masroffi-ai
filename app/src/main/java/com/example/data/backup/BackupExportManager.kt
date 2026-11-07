@@ -7,6 +7,7 @@ import com.example.data.local.RefundAccountingMode
 import com.example.data.local.TransactionEntity
 import com.example.data.local.TransactionSource
 import com.example.data.local.TransactionType
+import com.example.data.preferences.SupportedCurrencies
 import com.example.domain.MoneyUtils
 import com.squareup.moshi.JsonReader
 import com.squareup.moshi.JsonWriter
@@ -22,7 +23,8 @@ data class BackupPayload(
     val categories: List<CategoryEntity>,
     val transactions: List<TransactionEntity>,
     val budgets: List<BudgetEntity>,
-    val categoryRules: List<CategoryRuleEntity>
+    val categoryRules: List<CategoryRuleEntity>,
+    val currencyOpeningBalances: Map<String, Long> = emptyMap()
 )
 
 data class BackupValidationPreview(
@@ -33,7 +35,8 @@ data class BackupValidationPreview(
     val transactionsCount: Int = 0,
     val budgetsCount: Int = 0,
     val currencyCode: String = "EGP",
-    val openingBalanceMinorUnits: Long = 0L
+    val openingBalanceMinorUnits: Long = 0L,
+    val currencyOpeningBalances: Map<String, Long> = emptyMap()
 )
 
 /**
@@ -54,12 +57,24 @@ object BackupExportManager {
         transactions: List<TransactionEntity>,
         budgets: List<BudgetEntity>,
         categoryRules: List<CategoryRuleEntity>,
+        currencyOpeningBalances: Map<String, Long> = emptyMap(),
         nowMillis: Long = System.currentTimeMillis()
     ): String {
         val buffer = Buffer()
         val writer = JsonWriter.of(buffer).apply {
             indent = "  "
             serializeNulls = true
+        }
+
+        val effectiveOpeningBalances = LinkedHashMap<String, Long>()
+        for ((curr, bal) in currencyOpeningBalances) {
+            val supported = SupportedCurrencies.fromCodeOrNull(curr)
+            if (supported != null) {
+                effectiveOpeningBalances[supported.code] = bal
+            }
+        }
+        if (openingBalanceConfigured && !effectiveOpeningBalances.containsKey(currencyCode)) {
+            effectiveOpeningBalances[currencyCode] = openingBalanceMinorUnits
         }
 
         writer.beginObject()
@@ -71,6 +86,11 @@ object BackupExportManager {
         writer.name("currencyCode").value(currencyCode)
         writer.name("openingBalanceMinorUnits").value(openingBalanceMinorUnits)
         writer.name("openingBalanceConfigured").value(openingBalanceConfigured)
+        writer.name("currencyOpeningBalances").beginObject()
+        for ((curr, bal) in effectiveOpeningBalances) {
+            writer.name(curr).value(bal)
+        }
+        writer.endObject()
         writer.name("refundAccountingMode").value(refundMode.name)
         writer.endObject()
 
@@ -159,6 +179,8 @@ object BackupExportManager {
             var openingBalance = 0L
             var openingConfigured = false
             var refundMode = RefundAccountingMode.INCOME_CATEGORY
+            val parsedCurrencyBalances = LinkedHashMap<String, Long>()
+            var hasExplicitCurrencyBalances = false
 
             val categories = mutableListOf<CategoryEntity>()
             val rawTransactions = mutableListOf<TransactionEntity>()
@@ -175,9 +197,45 @@ object BackupExportManager {
                         reader.beginObject()
                         while (reader.hasNext()) {
                             when (reader.nextName()) {
-                                "currencyCode" -> currencyCode = readStringOrEmpty(reader).ifBlank { "EGP" }
+                                "currencyCode" -> {
+                                    val rawCurr = readStringOrEmpty(reader).trim().ifBlank { "EGP" }
+                                    val supported = SupportedCurrencies.fromCodeOrNull(rawCurr)
+                                        ?: return BackupValidationPreview(
+                                            isValid = false,
+                                            errorMessage = "عملة افتراضية غير مدعومة ($rawCurr) في ملف النسخة الاحتياطية."
+                                        )
+                                    currencyCode = supported.code
+                                }
                                 "openingBalanceMinorUnits" -> openingBalance = reader.nextLong()
                                 "openingBalanceConfigured" -> openingConfigured = reader.nextBoolean()
+                                "currencyOpeningBalances" -> {
+                                    hasExplicitCurrencyBalances = true
+                                    if (reader.peek() != JsonReader.Token.BEGIN_OBJECT) {
+                                        return BackupValidationPreview(
+                                            isValid = false,
+                                            errorMessage = "تنسيق الأرصدة الافتتاحية للعملات غير صالح في النسخة الاحتياطية."
+                                        )
+                                    }
+                                    reader.beginObject()
+                                    while (reader.hasNext()) {
+                                        val rawCurrKey = reader.nextName().trim()
+                                        val supported = SupportedCurrencies.fromCodeOrNull(rawCurrKey)
+                                            ?: return BackupValidationPreview(
+                                                isValid = false,
+                                                errorMessage = "عملة غير مدعومة ($rawCurrKey) في الأرصدة الافتتاحية للنسخة الاحتياطية."
+                                            )
+                                        val balMinor = try {
+                                            reader.nextLong()
+                                        } catch (e: Exception) {
+                                            return BackupValidationPreview(
+                                                isValid = false,
+                                                errorMessage = "قيمة رصيد افتتاحي غير صالحة للعملة ($rawCurrKey) في النسخة الاحتياطية."
+                                            )
+                                        }
+                                        parsedCurrencyBalances[supported.code] = balMinor
+                                    }
+                                    reader.endObject()
+                                }
                                 "refundAccountingMode" -> {
                                     val modeStr = readStringOrEmpty(reader)
                                     refundMode = runCatching { RefundAccountingMode.valueOf(modeStr) }
@@ -286,6 +344,11 @@ object BackupExportManager {
                                     errorMessage = "توجد معاملة غير صالحة أو بمبلغ صفري/سالب في ملف النسخة الاحتياطية."
                                 )
                             }
+                            val supportedTxCurr = SupportedCurrencies.fromCodeOrNull(txCurrency)
+                                ?: return BackupValidationPreview(
+                                    isValid = false,
+                                    errorMessage = "توجد معاملة بعملة غير مدعومة ($txCurrency) في ملف النسخة الاحتياطية."
+                                )
                             val type = runCatching { TransactionType.valueOf(typeStr) }.getOrNull()
                                 ?: return BackupValidationPreview(
                                     isValid = false,
@@ -299,7 +362,7 @@ object BackupExportManager {
                                     id = id,
                                     description = desc,
                                     amountMinorUnits = amountMinor,
-                                    currencyCode = txCurrency,
+                                    currencyCode = supportedTxCurr.code,
                                     type = type,
                                     categoryId = catId,
                                     transactionDate = txDate,
@@ -406,17 +469,31 @@ object BackupExportManager {
             }
             val safeRules = rawRules.filter { categoryIds.contains(it.categoryId) }
 
+            val finalCurrencyBalances = LinkedHashMap<String, Long>()
+            if (hasExplicitCurrencyBalances) {
+                finalCurrencyBalances.putAll(parsedCurrencyBalances)
+                if (openingConfigured && !finalCurrencyBalances.containsKey(currencyCode)) {
+                    finalCurrencyBalances[currencyCode] = openingBalance
+                }
+            } else if (openingConfigured) {
+                finalCurrencyBalances[currencyCode] = openingBalance
+            }
+
+            val effectiveDefaultConfigured = finalCurrencyBalances.containsKey(currencyCode) || openingConfigured
+            val effectiveDefaultOpening = finalCurrencyBalances[currencyCode] ?: openingBalance
+
             val payload = BackupPayload(
                 schemaVersion = schemaVersion,
                 exportedAtMillis = exportedAt,
                 currencyCode = currencyCode,
-                openingBalanceMinorUnits = openingBalance,
-                openingBalanceConfigured = openingConfigured,
+                openingBalanceMinorUnits = effectiveDefaultOpening,
+                openingBalanceConfigured = effectiveDefaultConfigured,
                 refundAccountingMode = refundMode,
                 categories = categories,
                 transactions = safeTransactions,
                 budgets = safeBudgets,
-                categoryRules = safeRules
+                categoryRules = safeRules,
+                currencyOpeningBalances = finalCurrencyBalances
             )
 
             BackupValidationPreview(
@@ -426,7 +503,8 @@ object BackupExportManager {
                 transactionsCount = safeTransactions.size,
                 budgetsCount = safeBudgets.size,
                 currencyCode = currencyCode,
-                openingBalanceMinorUnits = openingBalance
+                openingBalanceMinorUnits = effectiveDefaultOpening,
+                currencyOpeningBalances = finalCurrencyBalances
             )
         } catch (e: Exception) {
             BackupValidationPreview(
