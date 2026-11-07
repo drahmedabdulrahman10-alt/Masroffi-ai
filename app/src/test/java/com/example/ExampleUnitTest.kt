@@ -12,10 +12,12 @@ import com.example.domain.BudgetStatus
 import com.example.domain.FinancialCalculator
 import com.example.domain.MoneyUtils
 import com.example.domain.ai.EgyptianArabicLocalParser
+import com.example.domain.ai.RemoteAiProviderClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -376,5 +378,274 @@ class ExampleUnitTest {
         )
         assertTrue(csv.contains("\"مع صديق, وسط البلد\""))
         assertTrue(csv.contains("قهوة"))
+    }
+
+    // --- E. Remediation Verification Tests (REV-03, REV-04, REV-05, REV-08, REV-10, REV-11) ---
+
+    @Test
+    fun `multi-currency accounting never sums different currencies into one total (REV-03)`() {
+        val mixedCurrencyTxs = listOf(
+            TransactionEntity(
+                id = "egp_1",
+                description = "مرتب بالجنيه",
+                amountMinorUnits = 500_000L, // 5000 EGP
+                currencyCode = "EGP",
+                type = TransactionType.INCOME,
+                categoryId = DefaultCategories.CAT_SALARY,
+                transactionDate = 1730500000000L
+            ),
+            TransactionEntity(
+                id = "egp_2",
+                description = "فاتورة كهرباء",
+                amountMinorUnits = 50_000L, // 500 EGP
+                currencyCode = "EGP",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_BILLS,
+                transactionDate = 1730510000000L
+            ),
+            TransactionEntity(
+                id = "usd_1",
+                description = "Freelance USD payment",
+                amountMinorUnits = 20_000L, // 200 USD
+                currencyCode = "USD",
+                type = TransactionType.INCOME,
+                categoryId = DefaultCategories.CAT_FREELANCE,
+                transactionDate = 1730520000000L
+            ),
+            TransactionEntity(
+                id = "sar_1",
+                description = "عشاء في الرياض",
+                amountMinorUnits = 10_000L, // 100 SAR
+                currencyCode = "SAR",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_FOOD,
+                transactionDate = 1730530000000L
+            )
+        )
+
+        val egpSummary = FinancialCalculator.buildSummary(
+            openingBalanceMinorUnits = 100_000L, // 1000 EGP
+            openingBalanceConfigured = true,
+            allTransactions = mixedCurrencyTxs,
+            periodTransactions = mixedCurrencyTxs,
+            previousPeriodTransactions = emptyList(),
+            categories = defaultCategories,
+            monthBudgets = emptyList(),
+            currencyCode = "EGP",
+            refundAccountingMode = RefundAccountingMode.EXPENSE_OFFSET
+        )
+
+        // Primary EGP summary must only include EGP transactions (5000 income, 500 expense, +1000 opening = 5500 EGP)
+        assertEquals(500_000L, egpSummary.periodIncomeMinor)
+        assertEquals(50_000L, egpSummary.periodExpenseMinor)
+        assertEquals(450_000L, egpSummary.periodNetCashFlowMinor)
+        assertEquals(550_000L, egpSummary.currentBalanceMinor)
+
+        // Other currencies must be tracked separately without mixing
+        assertEquals(2, egpSummary.otherCurrencyBalances.size)
+        val usdSummary = egpSummary.otherCurrencyBalances.first { it.currencyCode == "USD" }
+        assertEquals(20_000L, usdSummary.totalIncomeMinor)
+        assertEquals(0L, usdSummary.totalExpenseMinor)
+        assertEquals(20_000L, usdSummary.netBalanceMinor)
+
+        val sarSummary = egpSummary.otherCurrencyBalances.first { it.currencyCode == "SAR" }
+        assertEquals(0L, sarSummary.totalIncomeMinor)
+        assertEquals(10_000L, sarSummary.totalExpenseMinor)
+        assertEquals(-10_000L, sarSummary.netBalanceMinor)
+    }
+
+    @Test
+    fun `refund calculations unify total expenses and category breakdown and only offset matching category (REV-04, REV-05)`() {
+        val txs = listOf(
+            TransactionEntity(
+                id = "exp_food",
+                description = "غداء",
+                amountMinorUnits = 20_000L, // 200 EGP
+                currencyCode = "EGP",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_FOOD,
+                transactionDate = 1730500000000L
+            ),
+            TransactionEntity(
+                id = "exp_transport",
+                description = "تاكسي",
+                amountMinorUnits = 10_000L, // 100 EGP
+                currencyCode = "EGP",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_TRANSPORT,
+                transactionDate = 1730510000000L
+            ),
+            TransactionEntity(
+                id = "ref_transport",
+                description = "استرداد رحلة تاكسي",
+                amountMinorUnits = 4_000L, // 40 EGP refund on transport
+                currencyCode = "EGP",
+                type = TransactionType.INCOME,
+                categoryId = DefaultCategories.CAT_TRANSPORT,
+                transactionDate = 1730520000000L,
+                isRefundOffset = true
+            )
+        )
+
+        // 1. EXPENSE_OFFSET mode: transport net expense becomes 100 - 40 = 60 EGP, food stays 200 EGP, total expense = 260 EGP
+        val offsetSummary = FinancialCalculator.buildSummary(
+            openingBalanceMinorUnits = 0L,
+            openingBalanceConfigured = false,
+            allTransactions = txs,
+            periodTransactions = txs,
+            previousPeriodTransactions = emptyList(),
+            categories = defaultCategories,
+            monthBudgets = emptyList(),
+            currencyCode = "EGP",
+            refundAccountingMode = RefundAccountingMode.EXPENSE_OFFSET
+        )
+
+        assertEquals(26_000L, offsetSummary.periodExpenseMinor)
+        assertEquals(0L, offsetSummary.periodIncomeMinor) // Fully applied as expense offset
+        assertEquals(-26_000L, offsetSummary.periodNetCashFlowMinor)
+        // Sum of category breakdown must equal periodExpenseMinor
+        assertEquals(
+            offsetSummary.periodExpenseMinor,
+            offsetSummary.expenseByCategory.sumOf { it.totalMinorUnits }
+        )
+        val foodBreakdown = offsetSummary.expenseByCategory.first { it.categoryId == DefaultCategories.CAT_FOOD }
+        val transportBreakdown = offsetSummary.expenseByCategory.first { it.categoryId == DefaultCategories.CAT_TRANSPORT }
+        assertEquals(20_000L, foodBreakdown.totalMinorUnits)
+        assertEquals(6_000L, transportBreakdown.totalMinorUnits)
+
+        // 2. INCOME_CATEGORY mode: refund is counted as income (40 EGP), expenses remain 300 EGP, net cash flow is still -260 EGP
+        val incomeModeSummary = FinancialCalculator.buildSummary(
+            openingBalanceMinorUnits = 0L,
+            openingBalanceConfigured = false,
+            allTransactions = txs,
+            periodTransactions = txs,
+            previousPeriodTransactions = emptyList(),
+            categories = defaultCategories,
+            monthBudgets = emptyList(),
+            currencyCode = "EGP",
+            refundAccountingMode = RefundAccountingMode.INCOME_CATEGORY
+        )
+
+        assertEquals(30_000L, incomeModeSummary.periodExpenseMinor)
+        assertEquals(4_000L, incomeModeSummary.periodIncomeMinor)
+        assertEquals(-26_000L, incomeModeSummary.periodNetCashFlowMinor)
+    }
+
+    @Test
+    fun `refund in one category never reduces unrelated categories even if refund exceeds category expense (REV-05)`() {
+        val txs = listOf(
+            TransactionEntity(
+                id = "exp_food",
+                description = "مطعم",
+                amountMinorUnits = 50_000L, // 500 EGP food
+                currencyCode = "EGP",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_FOOD,
+                transactionDate = 1730500000000L
+            ),
+            TransactionEntity(
+                id = "exp_transport",
+                description = "أوبر",
+                amountMinorUnits = 5_000L, // 50 EGP transport
+                currencyCode = "EGP",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_TRANSPORT,
+                transactionDate = 1730510000000L
+            ),
+            TransactionEntity(
+                id = "ref_transport_large",
+                description = "استرداد محفظة مواصلات",
+                amountMinorUnits = 8_000L, // 80 EGP refund on transport (exceeds 50 EGP transport expense by 30 EGP)
+                currencyCode = "EGP",
+                type = TransactionType.INCOME,
+                categoryId = DefaultCategories.CAT_TRANSPORT,
+                transactionDate = 1730520000000L,
+                isRefundOffset = true
+            )
+        )
+
+        val summary = FinancialCalculator.buildSummary(
+            openingBalanceMinorUnits = 0L,
+            openingBalanceConfigured = false,
+            allTransactions = txs,
+            periodTransactions = txs,
+            previousPeriodTransactions = emptyList(),
+            categories = defaultCategories,
+            monthBudgets = emptyList(),
+            currencyCode = "EGP",
+            refundAccountingMode = RefundAccountingMode.EXPENSE_OFFSET
+        )
+
+        // Food must remain untouched at 500 EGP; transport is offset to 0; unapplied 30 EGP remains in income
+        assertEquals(50_000L, summary.periodExpenseMinor)
+        assertEquals(3_000L, summary.periodIncomeMinor)
+        assertEquals(-47_000L, summary.periodNetCashFlowMinor)
+        assertEquals(1, summary.expenseByCategory.size)
+        assertEquals(DefaultCategories.CAT_FOOD, summary.expenseByCategory[0].categoryId)
+        assertEquals(50_000L, summary.expenseByCategory[0].totalMinorUnits)
+    }
+
+    @Test
+    fun `amount parser supports all app currency codes and symbols accurately (REV-10)`() {
+        assertEquals(12550L, MoneyUtils.parseAmountToMinorUnits("125.50 EGP"))
+        assertEquals(12550L, MoneyUtils.parseAmountToMinorUnits("125.50 ج.م"))
+        assertEquals(12550L, MoneyUtils.parseAmountToMinorUnits("125.50 جنيه"))
+        assertEquals(9900L, MoneyUtils.parseAmountToMinorUnits("99 USD"))
+        assertEquals(9900L, MoneyUtils.parseAmountToMinorUnits("$99.00"))
+        assertEquals(9900L, MoneyUtils.parseAmountToMinorUnits("99 دولار"))
+        assertEquals(25075L, MoneyUtils.parseAmountToMinorUnits("250.75 SAR"))
+        assertEquals(25075L, MoneyUtils.parseAmountToMinorUnits("٢٥٠٫٧٥ ر.س"))
+        assertEquals(25075L, MoneyUtils.parseAmountToMinorUnits("250.75 ريال"))
+        assertEquals(18000L, MoneyUtils.parseAmountToMinorUnits("180 AED"))
+        assertEquals(18000L, MoneyUtils.parseAmountToMinorUnits("180 د.إ"))
+        assertEquals(18000L, MoneyUtils.parseAmountToMinorUnits("180 درهم"))
+        assertEquals(4225L, MoneyUtils.parseAmountToMinorUnits("42.25 EUR"))
+        assertEquals(4225L, MoneyUtils.parseAmountToMinorUnits("€42.25"))
+        assertEquals(4225L, MoneyUtils.parseAmountToMinorUnits("42.25 يورو"))
+    }
+
+    @Test
+    fun `category learning avoids unsafe substring matching and short keywords (REV-11)`() {
+        val rules = listOf(
+            // Short 2-char rule must be ignored
+            CategoryRuleEntity(
+                keyword = "بن",
+                categoryId = DefaultCategories.CAT_FOOD,
+                transactionType = TransactionType.EXPENSE
+            ),
+            // 3-char rule "حلب" must NOT match inside "حلبة" or "محلب" (whole-word boundary only)
+            CategoryRuleEntity(
+                keyword = "نادي",
+                categoryId = DefaultCategories.CAT_SPORTS,
+                transactionType = TransactionType.EXPENSE
+            )
+        )
+
+        // "دفعت بنزين 100 جنيه" must match TRANSPORT ("بنزين"), NOT FOOD from short substring "بن"
+        val fuelRes = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "دفعت بنزين 100 جنيه",
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = rules
+        )
+        assertEquals(DefaultCategories.CAT_TRANSPORT, fuelRes.proposals[0].categoryId)
+
+        // "نادين" must NOT match rule "نادي" because it is not a whole-word match
+        val nonMatchRes = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "هدية نادين 100 جنيه",
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = rules
+        )
+        assertFalse(nonMatchRes.proposals[0].categoryId == DefaultCategories.CAT_SPORTS)
+    }
+
+    @Test
+    fun `RemoteAiProviderClient reuses singleton OkHttpClient instance (REV-08)`() {
+        val clientA = RemoteAiProviderClient.defaultOkHttpClient()
+        val clientB = RemoteAiProviderClient.defaultOkHttpClient()
+        assertSame(clientA, clientB)
     }
 }

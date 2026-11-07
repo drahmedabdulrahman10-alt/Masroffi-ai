@@ -36,6 +36,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -93,6 +94,7 @@ enum class MasroofiDestination(
 fun MasroofiApp(
     viewModel: MasroofiViewModel
 ) {
+    val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val systemDark = isSystemInDarkTheme()
     val isDark = when (uiState.preferences.themePreference) {
@@ -273,6 +275,7 @@ fun MasroofiApp(
                                         uiState = uiState,
                                         onUpdateCurrency = viewModel::updateCurrency,
                                         onUpdateTheme = viewModel::updateThemePreference,
+                                        onUpdateRefundMode = viewModel::updateRefundAccountingMode,
                                         onSaveOpeningBalance = viewModel::saveOpeningBalance,
                                         onSaveMonthlyBudget = viewModel::saveMonthlyBudget,
                                         onDeleteBudget = viewModel::deleteBudget,
@@ -282,12 +285,21 @@ fun MasroofiApp(
                                         onSaveAiSettings = viewModel::saveAiSettings,
                                         onRemoveApiKey = viewModel::removeApiKey,
                                         onTestAiConnection = viewModel::testAiConnection,
-                                        onCreateBackupJson = { viewModel.repository.createBackupJson() },
+                                        onCreateBackupJson = { viewModel.createBackupJsonString() },
                                         onValidateRestoreJson = viewModel::validateBackupFileContent,
                                         onDismissBackupPreview = viewModel::dismissBackupPreview,
                                         onConfirmRestoreBackup = viewModel::confirmRestoreBackup,
-                                        onExportCsv = { viewModel.repository.exportCsvString() },
-                                        onShowMessage = { /* handled via snackbar or toast */ }
+                                        onExportCsv = { viewModel.exportCsvString() },
+                                        onExportBackupToUri = { uri ->
+                                            viewModel.exportBackupToUri(context.contentResolver, uri)
+                                        },
+                                        onImportBackupFromUri = { uri ->
+                                            viewModel.importBackupFromUri(context.contentResolver, uri)
+                                        },
+                                        onExportCsvToUri = { uri ->
+                                            viewModel.exportCsvToUri(context.contentResolver, uri)
+                                        },
+                                        onShowMessage = viewModel::showUserMessage
                                     )
                                 }
                             }

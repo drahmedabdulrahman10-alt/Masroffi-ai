@@ -17,7 +17,9 @@ data class ProposedTransactionDraft(
     val confidence: Float = 0.90f,
     val isAmbiguous: Boolean = false,
     val ambiguityReason: String? = null,
-    val isRefundOffset: Boolean = false
+    val isRefundOffset: Boolean = false,
+    val suggestedCategoryId: String? = categoryId,
+    val userConfirmedCategory: Boolean = false
 ) {
     val isValidToSave: Boolean
         get() = description.isNotBlank() &&

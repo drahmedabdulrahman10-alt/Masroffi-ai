@@ -27,6 +27,9 @@ interface MasroofiDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertCategory(category: CategoryEntity)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertCategories(categories: List<CategoryEntity>)
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertCategoriesIgnore(categories: List<CategoryEntity>)
 
@@ -140,10 +143,7 @@ interface MasroofiDao {
         deleteAllBudgets()
         deleteAllCategoryRules()
         deleteAllCategories()
-        insertCategoriesIgnore(categories)
-        for (cat in categories) {
-            upsertCategory(cat)
-        }
+        upsertCategories(categories)
         insertTransactions(transactions)
         insertBudgets(budgets)
         insertCategoryRules(rules)
@@ -156,9 +156,7 @@ interface MasroofiDao {
         budgets: List<BudgetEntity>,
         rules: List<CategoryRuleEntity>
     ) {
-        for (cat in categories) {
-            upsertCategory(cat)
-        }
+        upsertCategories(categories)
         insertTransactions(transactions)
         insertBudgets(budgets)
         insertCategoryRules(rules)

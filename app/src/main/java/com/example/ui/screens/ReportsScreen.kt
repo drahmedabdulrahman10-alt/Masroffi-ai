@@ -173,32 +173,52 @@ fun ReportsScreen(
 
         // Aggregates Cards: Income, Expenses, Net Cash Flow
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                SummaryStatCard(
-                    title = "إجمالي الدخل",
-                    value = MoneyUtils.formatMinorUnits(summary.periodIncomeMinor, currency),
-                    valueColor = IncomeGreenLight,
-                    modifier = Modifier.weight(1f)
-                )
-                SummaryStatCard(
-                    title = "إجمالي المصروفات",
-                    value = MoneyUtils.formatMinorUnits(summary.periodExpenseMinor, currency),
-                    valueColor = ExpenseRedLight,
-                    modifier = Modifier.weight(1f)
-                )
-                SummaryStatCard(
-                    title = "صافي التدفق",
-                    value = MoneyUtils.formatMinorUnits(
-                        summary.periodNetCashFlowMinor,
-                        currency,
-                        showPlusSign = true
-                    ),
-                    valueColor = if (summary.periodNetCashFlowMinor >= 0) IncomeGreenLight else ExpenseRedLight,
-                    modifier = Modifier.weight(1f)
-                )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SummaryStatCard(
+                        title = "إجمالي الدخل",
+                        value = MoneyUtils.formatMinorUnits(summary.periodIncomeMinor, currency),
+                        valueColor = IncomeGreenLight,
+                        modifier = Modifier.weight(1f)
+                    )
+                    SummaryStatCard(
+                        title = "إجمالي المصروفات",
+                        value = MoneyUtils.formatMinorUnits(summary.periodExpenseMinor, currency),
+                        valueColor = ExpenseRedLight,
+                        modifier = Modifier.weight(1f)
+                    )
+                    SummaryStatCard(
+                        title = "صافي التدفق",
+                        value = MoneyUtils.formatMinorUnits(
+                            summary.periodNetCashFlowMinor,
+                            currency,
+                            showPlusSign = true
+                        ),
+                        valueColor = if (summary.periodNetCashFlowMinor >= 0) IncomeGreenLight else ExpenseRedLight,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                if (summary.otherCurrencyBalances.isNotEmpty()) {
+                    val otherText = summary.otherCurrencyBalances.joinToString(" • ") { item ->
+                        MoneyUtils.formatMinorUnits(item.netBalanceMinor, item.currencySymbol, showPlusSign = true)
+                    }
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "معاملات بعملات أخرى (محفوظة بشكل منفصل دون دمج مضلل): $otherText",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
+                }
             }
         }
 

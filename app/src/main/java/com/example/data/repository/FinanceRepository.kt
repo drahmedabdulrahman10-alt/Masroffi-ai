@@ -105,6 +105,13 @@ class FinanceRepository(
 
         val entity = if (existingId != null) {
             val prev = dao.getTransactionById(existingId)
+            if (prev != null && verifiedCategoryId != null && prev.categoryId != verifiedCategoryId) {
+                rememberCategoryCorrection(
+                    description = cleanDesc,
+                    categoryId = verifiedCategoryId,
+                    transactionType = type
+                )
+            }
             TransactionEntity(
                 id = existingId,
                 description = cleanDesc,
@@ -196,7 +203,9 @@ class FinanceRepository(
                 )
             )
 
-            if (rememberCategoryRules && verifiedCat != null && cleanDesc.length >= 2) {
+            val isUserCorrectedOrConfirmed = draft.userConfirmedCategory ||
+                (draft.categoryId != draft.suggestedCategoryId)
+            if (rememberCategoryRules && verifiedCat != null && isUserCorrectedOrConfirmed) {
                 rememberCategoryCorrection(
                     description = cleanDesc,
                     categoryId = verifiedCat.id,
@@ -218,8 +227,8 @@ class FinanceRepository(
         categoryId: String,
         transactionType: TransactionType
     ) {
-        val cleanKeyword = description.lowercase(Locale.ROOT).trim()
-        if (cleanKeyword.length < 2) return
+        val cleanKeyword = extractMeaningfulRuleKeyword(description)
+        if (cleanKeyword.length < 3) return
         dao.upsertCategoryRule(
             CategoryRuleEntity(
                 keyword = cleanKeyword,
@@ -228,6 +237,22 @@ class FinanceRepository(
                 updatedAt = System.currentTimeMillis()
             )
         )
+    }
+
+    private fun extractMeaningfulRuleKeyword(rawDescription: String): String {
+        val stopWords = setOf(
+            "اشتريت", "دفعت", "صرفت", "ركبت", "جبت", "حاسبت", "شحنت", "سددت", "كلت", "شربت",
+            "قبضت", "استلمت", "جالي", "حصلت", "من", "في", "على", "إلى", "الى", "عن", "مع",
+            "جنيه", "ج.م", "ريال", "دولار", "درهم", "يورو", "مصروف", "دخل", "معاملة"
+        )
+        val tokens = rawDescription
+            .lowercase(Locale.ROOT)
+            .replace(Regex("""\d+(?:\.\d+)?"""), " ")
+            .split(Regex("""[^\p{L}\p{N}]+"""))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && it !in stopWords }
+
+        return tokens.joinToString(" ").trim()
     }
 
     // --- User-Controlled Category Management ---
@@ -311,24 +336,6 @@ class FinanceRepository(
 
     // --- AI Parsing & Provider Orchestration ---
 
-    private fun resolveActiveProviderClient(providerType: AiProviderType): AiProviderClient {
-        if (customAiClientOverride != null) return customAiClientOverride
-        return RemoteAiProviderClient(
-            providerType = providerType,
-            apiKeyProvider = {
-                val keyId = when (providerType) {
-                    AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
-                    AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
-                }
-                preferencesRepository.secureKeyStorage.getApiKey(keyId)
-            },
-            modelIdProvider = {
-                // Synchronous read cached via preferences snapshot in caller
-                ""
-            }
-        )
-    }
-
     suspend fun parseMultiTransactionsWithAi(
         userText: String,
         todayIsoDate: String,
@@ -350,7 +357,8 @@ class FinanceRepository(
                 todayIsoDate = todayIsoDate,
                 defaultCurrency = prefs.currencyCode,
                 eligibleCategories = activeCategories,
-                learnedRules = learnedRules
+                learnedRules = learnedRules,
+                refundAccountingMode = prefs.refundAccountingMode
             )
             return Result.success(localRes)
         }
@@ -390,7 +398,8 @@ class FinanceRepository(
                         defaultCurrency = prefs.currencyCode,
                         eligibleCategories = activeCategories,
                         learnedRules = learnedRules,
-                        providerLabel = providerLabel
+                        providerLabel = providerLabel,
+                        refundAccountingMode = prefs.refundAccountingMode
                     )
                 },
                 onFailure = { err ->
@@ -405,7 +414,8 @@ class FinanceRepository(
             todayIsoDate = todayIsoDate,
             defaultCurrency = prefs.currencyCode,
             eligibleCategories = activeCategories,
-            learnedRules = learnedRules
+            learnedRules = learnedRules,
+            refundAccountingMode = prefs.refundAccountingMode
         )
         return Result.success(localResult)
     }

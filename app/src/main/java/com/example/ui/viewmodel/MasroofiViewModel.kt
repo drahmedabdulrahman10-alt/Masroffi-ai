@@ -1,6 +1,8 @@
 package com.example.ui.viewmodel
 
+import android.content.ContentResolver
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -25,13 +27,21 @@ import com.example.domain.MoneyUtils
 import com.example.domain.ai.AiParseResult
 import com.example.domain.ai.AiServiceException
 import com.example.domain.ai.ProposedTransactionDraft
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.nio.charset.StandardCharsets
 import java.util.Calendar
 
 enum class ReportPeriodFilter(val arabicLabel: String) {
@@ -107,13 +117,16 @@ data class MasroofiUiState(
     val snackbarMessage: String? = null
 )
 
-private data class LocalInteractiveState(
+private data class FinancialFilterState(
     val selectedHomeYearMonth: String = MoneyUtils.currentYearMonth(),
     val reportPeriodFilter: ReportPeriodFilter = ReportPeriodFilter.CURRENT_MONTH,
     val customReportStartIso: String = MoneyUtils.todayIsoDate(),
     val customReportEndIso: String = MoneyUtils.todayIsoDate(),
     val selectedReportDrilldownCategoryId: String? = null,
-    val historyFilter: TransactionHistoryFilter = TransactionHistoryFilter(),
+    val historyFilter: TransactionHistoryFilter = TransactionHistoryFilter()
+)
+
+private data class UiFeedbackAndAiState(
     val aiInputText: String = "",
     val isAiParsing: Boolean = false,
     val aiParseResult: AiParseResult? = null,
@@ -125,30 +138,88 @@ private data class LocalInteractiveState(
     val connectionTestMessage: String? = null,
     val connectionTestSuccess: Boolean? = null,
     val pendingBackupPreview: BackupValidationPreview? = null,
-    val snackbarMessage: String? = null,
-    val keyRefreshCounter: Int = 0
+    val snackbarMessage: String? = null
 )
 
+private data class ComputedFinancials(
+    val preferences: AppPreferencesState = AppPreferencesState(),
+    val categories: List<CategoryEntity> = emptyList(),
+    val allTransactions: List<TransactionEntity> = emptyList(),
+    val allBudgets: List<BudgetEntity> = emptyList(),
+    val filterState: FinancialFilterState = FinancialFilterState(),
+    val homeSummary: FinancialSummary = FinancialCalculator.buildSummary(
+        openingBalanceMinorUnits = 0L,
+        openingBalanceConfigured = false,
+        allTransactions = emptyList(),
+        periodTransactions = emptyList(),
+        previousPeriodTransactions = emptyList(),
+        categories = emptyList(),
+        monthBudgets = emptyList()
+    ),
+    val reportSummary: FinancialSummary = FinancialCalculator.buildSummary(
+        openingBalanceMinorUnits = 0L,
+        openingBalanceConfigured = false,
+        allTransactions = emptyList(),
+        periodTransactions = emptyList(),
+        previousPeriodTransactions = emptyList(),
+        categories = emptyList(),
+        monthBudgets = emptyList()
+    ),
+    val reportPeriodTransactions: List<TransactionEntity> = emptyList(),
+    val filteredHistoryTransactions: List<TransactionEntity> = emptyList()
+)
+
+private data class KeyStatus(
+    val maskedGeminiKey: String = "غير مُعد",
+    val maskedOpenRouterKey: String = "غير مُعد",
+    val hasGeminiKey: Boolean = false,
+    val hasOpenRouterKey: Boolean = false
+)
+
+@OptIn(ExperimentalCoroutinesApi::class)
 class MasroofiViewModel(
-    val repository: FinanceRepository
+    private val repository: FinanceRepository,
+    private val defaultDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
-    private val interactiveState = MutableStateFlow(LocalInteractiveState())
+    private val financialFilterState = MutableStateFlow(FinancialFilterState())
+    private val uiFeedbackAndAiState = MutableStateFlow(UiFeedbackAndAiState())
+    private val keyRefreshTrigger = MutableStateFlow(0)
 
     init {
-        viewModelScope.launch {
+        viewModelScope.launch(ioDispatcher) {
             repository.ensureDefaultCategoriesSeeded()
         }
     }
 
-    val uiState: StateFlow<MasroofiUiState> = combine(
+    private val keyStatusFlow: StateFlow<KeyStatus> = keyRefreshTrigger
+        .mapLatest {
+            val secureStorage = repository.preferencesRepository.secureKeyStorage
+            val geminiKey = secureStorage.getApiKey(SecureKeyStorage.KEY_GEMINI_API)
+            val openRouterKey = secureStorage.getApiKey(SecureKeyStorage.KEY_OPENROUTER_API)
+            KeyStatus(
+                maskedGeminiKey = secureStorage.maskApiKey(geminiKey),
+                maskedOpenRouterKey = secureStorage.maskApiKey(openRouterKey),
+                hasGeminiKey = geminiKey.isNotBlank(),
+                hasOpenRouterKey = openRouterKey.isNotBlank()
+            )
+        }
+        .flowOn(ioDispatcher)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = KeyStatus()
+        )
+
+    private val computedFinancialsFlow: StateFlow<ComputedFinancials> = combine(
         repository.preferencesRepository.preferencesFlow,
         repository.allCategoriesFlow,
         repository.allTransactionsFlow,
         repository.allBudgetsFlow,
-        interactiveState
-    ) { prefs, categories, transactions, budgets, local ->
-        val homeYearMonth = local.selectedHomeYearMonth
+        financialFilterState
+    ) { prefs, categories, transactions, budgets, filters ->
+        val homeYearMonth = filters.selectedHomeYearMonth
         val (homeStart, homeEnd) = MoneyUtils.monthDateRange(homeYearMonth)
         val prevHomeYearMonth = MoneyUtils.previousYearMonth(homeYearMonth)
         val (prevHomeStart, prevHomeEnd) = MoneyUtils.monthDateRange(prevHomeYearMonth)
@@ -164,17 +235,25 @@ class MasroofiViewModel(
             periodTransactions = homePeriodTxs,
             previousPeriodTransactions = prevHomePeriodTxs,
             categories = categories,
-            monthBudgets = homeBudgets
+            monthBudgets = homeBudgets,
+            currencyCode = prefs.currencyCode,
+            refundAccountingMode = prefs.refundAccountingMode
         )
 
         val (reportStart, reportEnd, prevReportRange) = resolveReportPeriodBounds(
-            filter = local.reportPeriodFilter,
-            customStartIso = local.customReportStartIso,
-            customEndIso = local.customReportEndIso
+            filter = filters.reportPeriodFilter,
+            customStartIso = filters.customReportStartIso,
+            customEndIso = filters.customReportEndIso
         )
-        val reportTxs = FinancialCalculator.filterByDateRange(transactions, reportStart, reportEnd)
+        val reportTxs = FinancialCalculator.filterByCurrency(
+            FinancialCalculator.filterByDateRange(transactions, reportStart, reportEnd),
+            prefs.currencyCode
+        )
         val prevReportTxs = if (prevReportRange != null) {
-            FinancialCalculator.filterByDateRange(transactions, prevReportRange.first, prevReportRange.second)
+            FinancialCalculator.filterByCurrency(
+                FinancialCalculator.filterByDateRange(transactions, prevReportRange.first, prevReportRange.second),
+                prefs.currencyCode
+            )
         } else {
             emptyList()
         }
@@ -188,61 +267,89 @@ class MasroofiViewModel(
             periodTransactions = reportTxs,
             previousPeriodTransactions = prevReportTxs,
             categories = categories,
-            monthBudgets = reportBudgets
+            monthBudgets = reportBudgets,
+            currencyCode = prefs.currencyCode,
+            refundAccountingMode = prefs.refundAccountingMode
         )
 
-        val filteredHistory = applyHistoryFilters(transactions, local.historyFilter)
+        val filteredHistory = applyHistoryFilters(transactions, filters.historyFilter)
 
-        val secureStorage = repository.preferencesRepository.secureKeyStorage
-        val geminiKey = secureStorage.getApiKey(SecureKeyStorage.KEY_GEMINI_API)
-        val openRouterKey = secureStorage.getApiKey(SecureKeyStorage.KEY_OPENROUTER_API)
-
-        MasroofiUiState(
+        ComputedFinancials(
             preferences = prefs,
             categories = categories,
             allTransactions = transactions,
             allBudgets = budgets,
-            selectedHomeYearMonth = homeYearMonth,
+            filterState = filters,
             homeSummary = homeSummary,
-            reportPeriodFilter = local.reportPeriodFilter,
-            customReportStartIso = local.customReportStartIso,
-            customReportEndIso = local.customReportEndIso,
             reportSummary = reportSummary,
-            selectedReportDrilldownCategoryId = local.selectedReportDrilldownCategoryId,
             reportPeriodTransactions = reportTxs,
-            historyFilter = local.historyFilter,
-            filteredHistoryTransactions = filteredHistory,
-            aiInputText = local.aiInputText,
-            isAiParsing = local.isAiParsing,
-            aiParseResult = local.aiParseResult,
-            aiErrorMessage = local.aiErrorMessage,
-            isGeneratingSmartSummary = local.isGeneratingSmartSummary,
-            smartSummaryResultText = local.smartSummaryResultText,
-            smartSummaryError = local.smartSummaryError,
-            maskedGeminiKey = secureStorage.maskApiKey(geminiKey),
-            maskedOpenRouterKey = secureStorage.maskApiKey(openRouterKey),
-            hasGeminiKey = geminiKey.isNotBlank(),
-            hasOpenRouterKey = openRouterKey.isNotBlank(),
-            isTestingConnection = local.isTestingConnection,
-            connectionTestMessage = local.connectionTestMessage,
-            connectionTestSuccess = local.connectionTestSuccess,
-            pendingBackupPreview = local.pendingBackupPreview,
-            snackbarMessage = local.snackbarMessage
+            filteredHistoryTransactions = filteredHistory
+        )
+    }
+        .flowOn(defaultDispatcher)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = ComputedFinancials()
+        )
+
+    val uiState: StateFlow<MasroofiUiState> = combine(
+        computedFinancialsFlow,
+        uiFeedbackAndAiState,
+        keyStatusFlow
+    ) { computed, uiFeedback, keys ->
+        MasroofiUiState(
+            preferences = computed.preferences,
+            categories = computed.categories,
+            allTransactions = computed.allTransactions,
+            allBudgets = computed.allBudgets,
+            selectedHomeYearMonth = computed.filterState.selectedHomeYearMonth,
+            homeSummary = computed.homeSummary,
+            reportPeriodFilter = computed.filterState.reportPeriodFilter,
+            customReportStartIso = computed.filterState.customReportStartIso,
+            customReportEndIso = computed.filterState.customReportEndIso,
+            reportSummary = computed.reportSummary,
+            selectedReportDrilldownCategoryId = computed.filterState.selectedReportDrilldownCategoryId,
+            reportPeriodTransactions = computed.reportPeriodTransactions,
+            historyFilter = computed.filterState.historyFilter,
+            filteredHistoryTransactions = computed.filteredHistoryTransactions,
+            aiInputText = uiFeedback.aiInputText,
+            isAiParsing = uiFeedback.isAiParsing,
+            aiParseResult = uiFeedback.aiParseResult,
+            aiErrorMessage = uiFeedback.aiErrorMessage,
+            isGeneratingSmartSummary = uiFeedback.isGeneratingSmartSummary,
+            smartSummaryResultText = uiFeedback.smartSummaryResultText,
+            smartSummaryError = uiFeedback.smartSummaryError,
+            maskedGeminiKey = keys.maskedGeminiKey,
+            maskedOpenRouterKey = keys.maskedOpenRouterKey,
+            hasGeminiKey = keys.hasGeminiKey,
+            hasOpenRouterKey = keys.hasOpenRouterKey,
+            isTestingConnection = uiFeedback.isTestingConnection,
+            connectionTestMessage = uiFeedback.connectionTestMessage,
+            connectionTestSuccess = uiFeedback.connectionTestSuccess,
+            pendingBackupPreview = uiFeedback.pendingBackupPreview,
+            snackbarMessage = uiFeedback.snackbarMessage
         )
     }.stateIn(
         scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
+        started = SharingStarted.Eagerly,
         initialValue = MasroofiUiState()
     )
 
     // --- Snackbar & UI Feedback ---
 
     fun clearSnackbar() {
-        interactiveState.update { it.copy(snackbarMessage = null) }
+        uiFeedbackAndAiState.update { it.copy(snackbarMessage = null) }
+    }
+
+    fun showUserMessage(message: String) {
+        if (message.isNotBlank()) {
+            showSnackbar(message)
+        }
     }
 
     private fun showSnackbar(msg: String) {
-        interactiveState.update { it.copy(snackbarMessage = msg) }
+        uiFeedbackAndAiState.update { it.copy(snackbarMessage = msg) }
     }
 
     // --- Manual Transaction Entry, Edit, Delete ---
@@ -308,14 +415,14 @@ class MasroofiViewModel(
     // --- AI Multi-Transaction Entry & Speech-to-Text ---
 
     fun updateAiInputText(text: String) {
-        interactiveState.update {
+        uiFeedbackAndAiState.update {
             it.copy(aiInputText = text, aiErrorMessage = null)
         }
     }
 
     fun appendRecognizedSpeech(spokenText: String) {
         if (spokenText.isBlank()) return
-        interactiveState.update { state ->
+        uiFeedbackAndAiState.update { state ->
             val combined = if (state.aiInputText.isBlank()) {
                 spokenText.trim()
             } else {
@@ -326,15 +433,15 @@ class MasroofiViewModel(
     }
 
     fun analyzeAiInput(useLocalParserOnly: Boolean = false) {
-        val currentText = interactiveState.value.aiInputText.trim()
+        val currentText = uiFeedbackAndAiState.value.aiInputText.trim()
         if (currentText.isEmpty()) {
-            interactiveState.update {
+            uiFeedbackAndAiState.update {
                 it.copy(aiErrorMessage = "يرجى كتابة أو إملاء معاملة واحدة على الأقل قبل التحليل.")
             }
             return
         }
 
-        interactiveState.update {
+        uiFeedbackAndAiState.update {
             it.copy(isAiParsing = true, aiErrorMessage = null, aiParseResult = null)
         }
 
@@ -367,7 +474,7 @@ class MasroofiViewModel(
                         )
                         batchRes.fold(
                             onSuccess = { count ->
-                                interactiveState.update {
+                                uiFeedbackAndAiState.update {
                                     it.copy(
                                         isAiParsing = false,
                                         aiInputText = "",
@@ -378,7 +485,7 @@ class MasroofiViewModel(
                                 }
                             },
                             onFailure = { err ->
-                                interactiveState.update {
+                                uiFeedbackAndAiState.update {
                                     it.copy(
                                         isAiParsing = false,
                                         aiParseResult = result,
@@ -388,7 +495,7 @@ class MasroofiViewModel(
                             }
                         )
                     } else {
-                        interactiveState.update {
+                        uiFeedbackAndAiState.update {
                             it.copy(
                                 isAiParsing = false,
                                 aiParseResult = result,
@@ -401,7 +508,7 @@ class MasroofiViewModel(
                     val msg = (err as? AiServiceException)?.arabicMessage
                         ?: err.message
                         ?: "حدث خطأ أثناء تحليل المعاملات."
-                    interactiveState.update {
+                    uiFeedbackAndAiState.update {
                         it.copy(isAiParsing = false, aiErrorMessage = msg)
                     }
                 }
@@ -410,7 +517,7 @@ class MasroofiViewModel(
     }
 
     fun updateProposedDraft(updatedDraft: ProposedTransactionDraft) {
-        val currentResult = interactiveState.value.aiParseResult ?: return
+        val currentResult = uiFeedbackAndAiState.value.aiParseResult ?: return
         val recalculatedMinor = MoneyUtils.parseAmountToMinorUnits(updatedDraft.amountText)
         val hasValidDate = MoneyUtils.isoDateToEpochMillis(updatedDraft.isoDate) != null
         val isNowAmbiguous = recalculatedMinor == null ||
@@ -436,7 +543,7 @@ class MasroofiViewModel(
         val updatedList = currentResult.proposals.map {
             if (it.draftId == normalizedDraft.draftId) normalizedDraft else it
         }
-        interactiveState.update {
+        uiFeedbackAndAiState.update {
             it.copy(
                 aiParseResult = currentResult.copy(
                     proposals = updatedList,
@@ -447,9 +554,9 @@ class MasroofiViewModel(
     }
 
     fun removeProposedDraft(draftId: String) {
-        val currentResult = interactiveState.value.aiParseResult ?: return
+        val currentResult = uiFeedbackAndAiState.value.aiParseResult ?: return
         val remaining = currentResult.proposals.filterNot { it.draftId == draftId }
-        interactiveState.update {
+        uiFeedbackAndAiState.update {
             it.copy(
                 aiParseResult = if (remaining.isEmpty()) {
                     null
@@ -464,13 +571,13 @@ class MasroofiViewModel(
     }
 
     fun cancelAiReview() {
-        interactiveState.update {
+        uiFeedbackAndAiState.update {
             it.copy(aiParseResult = null, aiErrorMessage = null)
         }
     }
 
     fun saveAllReviewedProposals(onSavedSuccess: () -> Unit = {}) {
-        val currentResult = interactiveState.value.aiParseResult ?: return
+        val currentResult = uiFeedbackAndAiState.value.aiParseResult ?: return
         val invalidDraft = currentResult.proposals.firstOrNull { !it.isValidToSave }
         if (invalidDraft != null) {
             showSnackbar("يرجى استكمال المبلغ والوصف والتاريخ لجميع المعاملات المقترحة قبل الحفظ.")
@@ -484,7 +591,7 @@ class MasroofiViewModel(
             )
             saveRes.fold(
                 onSuccess = { count ->
-                    interactiveState.update {
+                    uiFeedbackAndAiState.update {
                         it.copy(
                             aiInputText = "",
                             aiParseResult = null,
@@ -590,20 +697,24 @@ class MasroofiViewModel(
     // --- Filters & Navigation State ---
 
     fun setHomeYearMonth(yearMonth: String) {
-        interactiveState.update { it.copy(selectedHomeYearMonth = yearMonth) }
+        financialFilterState.update { it.copy(selectedHomeYearMonth = yearMonth) }
     }
 
     fun setReportPeriodFilter(
         filter: ReportPeriodFilter,
-        customStartIso: String = interactiveState.value.customReportStartIso,
-        customEndIso: String = interactiveState.value.customReportEndIso
+        customStartIso: String = financialFilterState.value.customReportStartIso,
+        customEndIso: String = financialFilterState.value.customReportEndIso
     ) {
-        interactiveState.update {
+        financialFilterState.update {
             it.copy(
                 reportPeriodFilter = filter,
                 customReportStartIso = customStartIso,
                 customReportEndIso = customEndIso,
-                selectedReportDrilldownCategoryId = null,
+                selectedReportDrilldownCategoryId = null
+            )
+        }
+        uiFeedbackAndAiState.update {
+            it.copy(
                 smartSummaryResultText = null,
                 smartSummaryError = null
             )
@@ -611,18 +722,18 @@ class MasroofiViewModel(
     }
 
     fun selectReportCategoryDrilldown(categoryId: String?) {
-        interactiveState.update {
+        financialFilterState.update {
             val next = if (it.selectedReportDrilldownCategoryId == categoryId) null else categoryId
             it.copy(selectedReportDrilldownCategoryId = next)
         }
     }
 
     fun updateHistoryFilter(filter: TransactionHistoryFilter) {
-        interactiveState.update { it.copy(historyFilter = filter) }
+        financialFilterState.update { it.copy(historyFilter = filter) }
     }
 
     fun clearHistoryFilters() {
-        interactiveState.update { it.copy(historyFilter = TransactionHistoryFilter()) }
+        financialFilterState.update { it.copy(historyFilter = TransactionHistoryFilter()) }
     }
 
     // --- Smart Financial Summary ---
@@ -648,7 +759,7 @@ class MasroofiViewModel(
             أعلى تصنيفات الإنفاق: $topCategoriesText
         """.trimIndent()
 
-        interactiveState.update {
+        uiFeedbackAndAiState.update {
             it.copy(
                 isGeneratingSmartSummary = true,
                 smartSummaryError = null,
@@ -660,7 +771,7 @@ class MasroofiViewModel(
             val res = repository.generateSmartSummary(facts)
             res.fold(
                 onSuccess = { text ->
-                    interactiveState.update {
+                    uiFeedbackAndAiState.update {
                         it.copy(isGeneratingSmartSummary = false, smartSummaryResultText = text)
                     }
                 },
@@ -668,7 +779,7 @@ class MasroofiViewModel(
                     val msg = (err as? AiServiceException)?.arabicMessage
                         ?: err.message
                         ?: "تعذر إنشاء الملخص الذكي"
-                    interactiveState.update {
+                    uiFeedbackAndAiState.update {
                         it.copy(isGeneratingSmartSummary = false, smartSummaryError = msg)
                     }
                 }
@@ -718,17 +829,24 @@ class MasroofiViewModel(
                 autoSaveConfidence = autoSaveConfidence,
                 aiSummaryEnabled = aiSummaryEnabled
             )
+            var keySaveErrorMessage: String? = null
             if (newApiKeyInput.isNotBlank()) {
                 val keyId = when (provider) {
                     AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
                     AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
                 }
-                repository.preferencesRepository.secureKeyStorage.saveApiKey(keyId, newApiKeyInput.trim())
+                val saveRes = withContext(ioDispatcher) {
+                    repository.preferencesRepository.secureKeyStorage.saveApiKey(keyId, newApiKeyInput.trim())
+                }
+                if (saveRes.isFailure) {
+                    keySaveErrorMessage = saveRes.exceptionOrNull()?.message
+                        ?: "تعذر تشفير مفتاح API بأمان عبر Android Keystore."
+                }
             }
-            interactiveState.update {
+            keyRefreshTrigger.update { it + 1 }
+            uiFeedbackAndAiState.update {
                 it.copy(
-                    keyRefreshCounter = it.keyRefreshCounter + 1,
-                    snackbarMessage = "تم حفظ إعدادات الذكاء الاصطناعي بنجاح"
+                    snackbarMessage = keySaveErrorMessage ?: "تم حفظ إعدادات الذكاء الاصطناعي بنجاح"
                 )
             }
         }
@@ -739,14 +857,18 @@ class MasroofiViewModel(
             AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
             AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
         }
-        repository.preferencesRepository.secureKeyStorage.removeApiKey(keyId)
-        interactiveState.update {
-            it.copy(
-                keyRefreshCounter = it.keyRefreshCounter + 1,
-                connectionTestMessage = null,
-                connectionTestSuccess = null,
-                snackbarMessage = "تم حذف مفتاح API المحفوظ"
-            )
+        viewModelScope.launch {
+            withContext(ioDispatcher) {
+                repository.preferencesRepository.secureKeyStorage.removeApiKey(keyId)
+            }
+            keyRefreshTrigger.update { it + 1 }
+            uiFeedbackAndAiState.update {
+                it.copy(
+                    connectionTestMessage = null,
+                    connectionTestSuccess = null,
+                    snackbarMessage = "تم حذف مفتاح API المحفوظ"
+                )
+            }
         }
     }
 
@@ -759,11 +881,8 @@ class MasroofiViewModel(
             AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
             AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
         }
-        val effectiveKey = candidateKeyInput.trim().ifEmpty {
-            repository.preferencesRepository.secureKeyStorage.getApiKey(storedKeyId)
-        }
 
-        interactiveState.update {
+        uiFeedbackAndAiState.update {
             it.copy(
                 isTestingConnection = true,
                 connectionTestMessage = null,
@@ -772,6 +891,11 @@ class MasroofiViewModel(
         }
 
         viewModelScope.launch {
+            val effectiveKey = candidateKeyInput.trim().ifEmpty {
+                withContext(ioDispatcher) {
+                    repository.preferencesRepository.secureKeyStorage.getApiKey(storedKeyId)
+                }
+            }
             val res = repository.testProviderConnection(
                 provider = provider,
                 apiKey = effectiveKey,
@@ -779,7 +903,7 @@ class MasroofiViewModel(
             )
             res.fold(
                 onSuccess = { msg ->
-                    interactiveState.update {
+                    uiFeedbackAndAiState.update {
                         it.copy(
                             isTestingConnection = false,
                             connectionTestMessage = msg,
@@ -791,7 +915,7 @@ class MasroofiViewModel(
                     val msg = (err as? AiServiceException)?.arabicMessage
                         ?: err.message
                         ?: "فشل الاتصال بالمزود"
-                    interactiveState.update {
+                    uiFeedbackAndAiState.update {
                         it.copy(
                             isTestingConnection = false,
                             connectionTestMessage = msg,
@@ -805,30 +929,99 @@ class MasroofiViewModel(
 
     // --- Backup & CSV Export ---
 
+    suspend fun createBackupJsonString(): String = withContext(ioDispatcher) {
+        repository.createBackupJson()
+    }
+
+    suspend fun exportCsvString(): String = withContext(ioDispatcher) {
+        repository.exportCsvString()
+    }
+
+    fun exportBackupToUri(contentResolver: ContentResolver, uri: Uri) {
+        viewModelScope.launch {
+            try {
+                withContext(ioDispatcher) {
+                    val json = repository.createBackupJson()
+                    val out = contentResolver.openOutputStream(uri)
+                        ?: throw IllegalStateException("تعذر فتح ملف الوجهة للكتابة")
+                    out.use { stream ->
+                        stream.write(json.toByteArray(StandardCharsets.UTF_8))
+                        stream.flush()
+                    }
+                }
+                showSnackbar("تم حفظ النسخة الاحتياطية (JSON) بنجاح بدون أي مفاتيح API.")
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                showSnackbar("فشل تصدير النسخة الاحتياطية: ${e.message}")
+            }
+        }
+    }
+
+    fun importBackupFromUri(contentResolver: ContentResolver, uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val content = withContext(ioDispatcher) {
+                    val input = contentResolver.openInputStream(uri)
+                        ?: throw IllegalStateException("تعذر فتح ملف النسخة الاحتياطية")
+                    input.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                }
+                validateBackupFileContent(content)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                showSnackbar("تعذر قراءة ملف النسخة الاحتياطية: ${e.message}")
+            }
+        }
+    }
+
+    fun exportCsvToUri(contentResolver: ContentResolver, uri: Uri) {
+        viewModelScope.launch {
+            try {
+                withContext(ioDispatcher) {
+                    val csv = repository.exportCsvString()
+                    val out = contentResolver.openOutputStream(uri)
+                        ?: throw IllegalStateException("تعذر فتح ملف CSV للكتابة")
+                    out.use { stream ->
+                        stream.write(csv.toByteArray(StandardCharsets.UTF_8))
+                        stream.flush()
+                    }
+                }
+                showSnackbar("تم تصدير المعاملات إلى ملف CSV بنجاح.")
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                showSnackbar("فشل تصدير ملف CSV: ${e.message}")
+            }
+        }
+    }
+
     fun validateBackupFileContent(rawJson: String) {
         val preview = BackupExportManager.validateAndPreviewBackupJson(rawJson)
         if (!preview.isValid) {
             showSnackbar(preview.errorMessage ?: "ملف النسخة الاحتياطية غير صالح")
         }
-        interactiveState.update { it.copy(pendingBackupPreview = preview) }
+        uiFeedbackAndAiState.update { it.copy(pendingBackupPreview = preview) }
     }
 
     fun dismissBackupPreview() {
-        interactiveState.update { it.copy(pendingBackupPreview = null) }
+        uiFeedbackAndAiState.update { it.copy(pendingBackupPreview = null) }
     }
 
     fun confirmRestoreBackup(mode: RestoreMode) {
-        val preview = interactiveState.value.pendingBackupPreview
+        val preview = uiFeedbackAndAiState.value.pendingBackupPreview
         val payload = preview?.payload
         if (preview == null || !preview.isValid || payload == null) {
             showSnackbar("لا توجد نسخة احتياطية صالحة للاستعادة")
             return
         }
         viewModelScope.launch {
-            val res = repository.applyValidatedBackup(payload, mode)
+            val res = withContext(ioDispatcher) {
+                repository.applyValidatedBackup(payload, mode)
+            }
             res.fold(
                 onSuccess = {
-                    interactiveState.update {
+                    uiFeedbackAndAiState.update {
                         it.copy(
                             pendingBackupPreview = null,
                             snackbarMessage = "تمت استعادة النسخة الاحتياطية بنجاح (${payload.transactions.size} معاملة)"

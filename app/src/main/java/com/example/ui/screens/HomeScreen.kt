@@ -239,11 +239,25 @@ fun HomeScreen(
                             text = if (summary.openingBalanceConfigured) {
                                 "محسوب من الرصيد الافتتاحي وجميع المعاملات المحفوظة فقط"
                             } else {
-                                "الرصيد الافتتاحي غير مضبوط (0 ج.م) — يعكس الرصيد المعاملات المسجلة فقط"
+                                "الرصيد الافتتاحي غير مضبوط (0 $currency) — يعكس الرصيد المعاملات المسجلة فقط"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.White.copy(alpha = 0.8f)
                         )
+
+                        if (summary.otherCurrencyBalances.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            val otherText = summary.otherCurrencyBalances.joinToString(" • ") { item ->
+                                MoneyUtils.formatMinorUnits(item.netBalanceMinor, item.currencySymbol, showPlusSign = true)
+                            }
+                            Text(
+                                text = "أرصدة مستقلة بعملات أخرى: $otherText",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White.copy(alpha = 0.92f),
+                                modifier = Modifier.testTag("other_currency_balances_text")
+                            )
+                        }
                     }
                 }
             }

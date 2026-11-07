@@ -333,13 +333,15 @@ class RemoteAiProviderClient(
             3. اختر categoryId فقط من قائمة التصنيفات المتاحة المطابقة لنوع المعاملة (EXPENSE أو INCOME)، وإذا لم يوجد تصنيف مناسب اجعل categoryId = null.
         """.trimIndent()
 
-        fun defaultOkHttpClient(): OkHttpClient {
-            return OkHttpClient.Builder()
+        private val sharedOkHttpClient: OkHttpClient by lazy {
+            OkHttpClient.Builder()
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(25, TimeUnit.SECONDS)
                 .writeTimeout(15, TimeUnit.SECONDS)
                 .retryOnConnectionFailure(false)
                 .build()
         }
+
+        fun defaultOkHttpClient(): OkHttpClient = sharedOkHttpClient
     }
 }

@@ -6,6 +6,9 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 
 data class SpeechRecognitionState(
     val isListening: Boolean = false,
@@ -23,9 +26,18 @@ class MasroofiSpeechHelper(
     private val context: Context,
     private val onStateChanged: (SpeechRecognitionState) -> Unit,
     private val onFinalTextRecognized: (String) -> Unit
-) {
+) : LifecycleEventObserver {
     private var speechRecognizer: SpeechRecognizer? = null
     private var currentState = SpeechRecognitionState()
+
+    override fun onStateChanged(source: LifecycleOwner, event: Lifecycle.Event) {
+        if (event == Lifecycle.Event.ON_PAUSE ||
+            event == Lifecycle.Event.ON_STOP ||
+            event == Lifecycle.Event.ON_DESTROY
+        ) {
+            stopListening()
+        }
+    }
 
     fun isAvailable(): Boolean {
         return SpeechRecognizer.isRecognitionAvailable(context)
@@ -86,6 +98,7 @@ class MasroofiSpeechHelper(
                 }
 
                 override fun onError(error: Int) {
+                    destroyRecognizerSilently()
                     val msg = mapSpeechErrorToArabic(error)
                     updateState(
                         SpeechRecognitionState(
@@ -97,6 +110,7 @@ class MasroofiSpeechHelper(
                 }
 
                 override fun onResults(results: Bundle?) {
+                    destroyRecognizerSilently()
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     val topText = matches?.firstOrNull { it.isNotBlank() }?.trim().orEmpty()
                     if (topText.isEmpty()) {
@@ -138,6 +152,13 @@ class MasroofiSpeechHelper(
     }
 
     fun stopListening() {
+        destroyRecognizerSilently()
+        if (currentState.isListening) {
+            updateState(currentState.copy(isListening = false, partialText = ""))
+        }
+    }
+
+    private fun destroyRecognizerSilently() {
         try {
             speechRecognizer?.stopListening()
             speechRecognizer?.cancel()
@@ -145,9 +166,6 @@ class MasroofiSpeechHelper(
         } catch (_: Exception) {
         } finally {
             speechRecognizer = null
-            if (currentState.isListening) {
-                updateState(currentState.copy(isListening = false))
-            }
         }
     }
 

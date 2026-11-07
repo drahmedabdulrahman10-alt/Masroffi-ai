@@ -48,6 +48,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.example.data.local.TransactionEntity
 import com.example.data.local.TransactionType
+import com.example.data.preferences.SupportedCurrencies
 import com.example.domain.MoneyUtils
 import com.example.ui.components.TransactionItemCard
 import com.example.ui.viewmodel.MasroofiUiState
@@ -308,9 +309,19 @@ fun TransactionsScreen(
         } else {
             groupedByDate.forEach { (dateLabel, dayTransactions) ->
                 item(key = "header_$dateLabel") {
-                    val dayNet = dayTransactions.sumOf {
-                        if (it.type == TransactionType.INCOME) it.amountMinorUnits else -it.amountMinorUnits
-                    }
+                    val dayNetsFormatted = dayTransactions
+                        .groupBy { it.currencyCode.ifBlank { uiState.preferences.currencyCode } }
+                        .entries
+                        .joinToString(" | ") { (code, txs) ->
+                            val net = txs.sumOf {
+                                if (it.type == TransactionType.INCOME) it.amountMinorUnits else -it.amountMinorUnits
+                            }
+                            MoneyUtils.formatMinorUnits(
+                                minorUnits = net,
+                                currencySymbol = SupportedCurrencies.fromCode(code).symbol,
+                                showPlusSign = true
+                            )
+                        }
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
                         shape = MaterialTheme.shapes.small,
@@ -329,7 +340,7 @@ fun TransactionsScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "صافي اليوم: ${MoneyUtils.formatMinorUnits(dayNet, currency, showPlusSign = true)}",
+                                text = "صافي اليوم: $dayNetsFormatted",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

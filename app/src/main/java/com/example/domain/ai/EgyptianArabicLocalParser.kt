@@ -2,6 +2,7 @@ package com.example.domain.ai
 
 import com.example.data.local.CategoryEntity
 import com.example.data.local.CategoryRuleEntity
+import com.example.data.local.RefundAccountingMode
 import com.example.data.local.TransactionType
 import com.example.domain.MoneyUtils
 import com.squareup.moshi.JsonReader
@@ -107,6 +108,42 @@ object EgyptianArabicLocalParser {
         "bought", "paid", "spent"
     )
 
+    private val refundKeywords = listOf(
+        "استرداد", "مرجع", "مرتجع", "كاش باك", "refund", "cashback"
+    )
+
+    private val lineSplitRegex = Regex("""[\r\n؛;]+""")
+    private val splitPattern = Regex(
+        """(?<=(?:جنيه|ج\.م|ريال|ر\.س|دولار|درهم|د\.إ|يورو|قرش|EGP|USD|SAR|AED|EUR|\d))\s+(?:و\s*|كمان\s+|ثم\s+|،\s*)|(?:\s+و\s*(?=(?:اشتريت|دفعت|صرفت|ركبت|جبت|قبضت|حاسبت|شحنت|سددت)(?:\s|$)))"""
+    )
+    private val compoundRegex = Regex(
+        """(?:بـ?\s*)?(واحد|اتنين|اثنين|تلاتة|ثلاثة|اربعة|أربعة|خمسة|ستة|سبعة|تمانية|ثمانية|تسعة)\s+و\s*(عشرين|تلاتين|ثلاثين|اربعين|أربعين|خمسين|ستين|سبعين|تمانين|ثمانين|تسعين)(?:\s+ونص|\s+وربع)?(?:\s*(?:جنيه|ج\.م|ريال|ر\.س|دولار|درهم|د\.إ|يورو|EGP|SAR|USD|AED|EUR))?"""
+    )
+    private val explicitCurrencyNumericRegex = Regex(
+        """(?:بـ?\s*)?(\d+(?:\.\d{1,2})?)\s*(?:ونص|و\s*نص)?\s*(?:جنيه|ج\.م|جنية|ريال|ر\.س|دولار|درهم|د\.إ|يورو|\$|€|EGP|SAR|USD|AED|EUR)""",
+        RegexOption.IGNORE_CASE
+    )
+    private val singleWordKeysPattern = numberWordsMap.keys
+        .filter { it != "جنيه" }
+        .sortedByDescending { it.length }
+        .joinToString("|") { Regex.escape(it) }
+    private val wordAmountRegex = Regex(
+        """(?:بـ?\s*($singleWordKeysPattern)(?:\s+ونص|\s+وربع)?(?:\s*(?:جنيه|ج\.م|جنية))?)|(?:($singleWordKeysPattern)(?:\s+ونص|\s+وربع)?\s*(?:جنيه|ج\.م|جنية))"""
+    )
+    private val biNumberRegex = Regex("""بـ?\s*(\d+(?:\.\d{1,2})?)""")
+    private val trailingOrStandaloneNumber = Regex("""(?:^|\s)(\d+(?:\.\d{1,2})?)(?:\s*$)""")
+    private val residualCurrencyRegex = Regex(
+        """(?:^|\s)(?:جنيه|جنية|ج\.م|ريال|ر\.س|درهم|د\.إ|دولار|يورو|\$|€|EGP|USD|SAR|AED|EUR)(?=\s|$)""",
+        RegexOption.IGNORE_CASE
+    )
+    private val leadingActionVerbRegexes = (expenseActionPrefixes + listOf("قبضت", "استلمت", "جالي")).map { verb ->
+        Regex("""^\s*${Regex.escape(verb)}\s+(?:على\s+|في\s+)?""")
+    }
+    private val leadingPrepositionRegex = Regex("""^(?:على|في|بـ|ب)\s+""")
+    private val trailingBiRegex = Regex("""\s+بـ?\s*$""")
+    private val whitespaceRegex = Regex("""\s+""")
+    private val tokenSplitRegex = Regex("""[^\p{L}\p{N}]+""")
+
     private val categoryKeywordDictionary: Map<String, List<String>> = mapOf(
         "أكل وشرب" to listOf(
             "طماطم", "جبنة", "عيش", "خبز", "أكل", "اكل", "شرب", "قهوة", "شاي", "عصير",
@@ -163,7 +200,8 @@ object EgyptianArabicLocalParser {
         todayIsoDate: String,
         defaultCurrency: String,
         eligibleCategories: List<CategoryEntity>,
-        learnedRules: List<CategoryRuleEntity>
+        learnedRules: List<CategoryRuleEntity>,
+        refundAccountingMode: RefundAccountingMode = RefundAccountingMode.EXPENSE_OFFSET
     ): AiParseResult {
         val activeCategories = eligibleCategories.filter { !it.isArchived }
         val normalizedInput = MoneyUtils.normalizeDigits(rawText.trim())
@@ -188,7 +226,8 @@ object EgyptianArabicLocalParser {
                 todayIsoDate = todayIsoDate,
                 defaultCurrency = defaultCurrency,
                 activeCategories = activeCategories,
-                learnedRules = learnedRules
+                learnedRules = learnedRules,
+                refundAccountingMode = refundAccountingMode
             )
             if (draft != null) {
                 proposals.add(draft)
@@ -216,14 +255,11 @@ object EgyptianArabicLocalParser {
      * Uses Unicode-safe whitespace boundaries rather than ASCII \b.
      */
     fun splitIntoTransactionSegments(text: String): List<String> {
-        val lines = text.split(Regex("""[\r\n؛;]+"""))
+        val lines = text.split(lineSplitRegex)
             .map { it.trim() }
             .filter { it.isNotBlank() }
 
         val result = mutableListOf<String>()
-        val splitPattern = Regex(
-            """(?<=(?:جنيه|ج\.م|ريال|دولار|قرش|EGP|USD|\d))\s+(?:و\s*|كمان\s+|ثم\s+|،\s*)|(?:\s+و\s*(?=(?:اشتريت|دفعت|صرفت|ركبت|جبت|قبضت|حاسبت|شحنت|سددت)(?:\s|$)))"""
-        )
 
         for (line in lines) {
             val protectedLine = protectCompoundArabicNumbers(line)
@@ -268,12 +304,18 @@ object EgyptianArabicLocalParser {
             .replace("_AND_", " و")
     }
 
+    private fun isRefundSegment(text: String): Boolean {
+        val lower = text.lowercase(Locale.ROOT)
+        return refundKeywords.any { containsWholePhrase(lower, it) }
+    }
+
     private fun parseSingleSegment(
         segment: String,
         todayIsoDate: String,
         defaultCurrency: String,
         activeCategories: List<CategoryEntity>,
-        learnedRules: List<CategoryRuleEntity>
+        learnedRules: List<CategoryRuleEntity>,
+        refundAccountingMode: RefundAccountingMode
     ): ProposedTransactionDraft? {
         val txType = detectTransactionType(segment)
         val extractedAmount = extractMonetaryAmount(segment)
@@ -290,13 +332,33 @@ object EgyptianArabicLocalParser {
         val amountMinor = extractedAmount?.minorUnits
         val isAmbiguousAmount = amountMinor == null || amountMinor <= 0L || extractedAmount.isUncertain
 
-        val matchedCategory = matchBestCategory(
-            description = finalDesc,
-            fullSegment = segment,
-            type = txType,
-            activeCategories = activeCategories,
-            learnedRules = learnedRules
-        )
+        val isRefund = txType == TransactionType.INCOME && isRefundSegment(segment)
+        val isRefundOffset = isRefund && refundAccountingMode == RefundAccountingMode.EXPENSE_OFFSET
+
+        val matchedCategory = if (isRefundOffset) {
+            // Try matching the original expense category being refunded first, falling back to income refund category
+            matchBestCategory(
+                description = finalDesc,
+                fullSegment = segment,
+                type = TransactionType.EXPENSE,
+                activeCategories = activeCategories,
+                learnedRules = learnedRules
+            ) ?: matchBestCategory(
+                description = finalDesc,
+                fullSegment = segment,
+                type = TransactionType.INCOME,
+                activeCategories = activeCategories,
+                learnedRules = learnedRules
+            )
+        } else {
+            matchBestCategory(
+                description = finalDesc,
+                fullSegment = segment,
+                type = txType,
+                activeCategories = activeCategories,
+                learnedRules = learnedRules
+            )
+        }
 
         val isAmbiguousCategory = matchedCategory == null
         val confidence = when {
@@ -328,7 +390,10 @@ object EgyptianArabicLocalParser {
             notes = "",
             confidence = confidence,
             isAmbiguous = isAmbiguousAmount || isAmbiguousCategory,
-            ambiguityReason = ambiguityReason
+            ambiguityReason = ambiguityReason,
+            isRefundOffset = isRefundOffset,
+            suggestedCategoryId = matchedCategory?.id,
+            userConfirmedCategory = false
         )
     }
 
@@ -344,9 +409,6 @@ object EgyptianArabicLocalParser {
         val normalized = MoneyUtils.normalizeDigits(segment)
 
         // 1. Check compound Arabic word numbers first (e.g. "بخمسة وأربعين جنيه", "خمسة وأربعين جنيه")
-        val compoundRegex = Regex(
-            """(?:بـ?\s*)?(واحد|اتنين|اثنين|تلاتة|ثلاثة|اربعة|أربعة|خمسة|ستة|سبعة|تمانية|ثمانية|تسعة)\s+و\s*(عشرين|تلاتين|ثلاثين|اربعين|أربعين|خمسين|ستين|سبعين|تمانين|ثمانين|تسعين)(?:\s+ونص|\s+وربع)?(?:\s*(?:جنيه|ج\.م|ريال|دولار|EGP))?"""
-        )
         val compoundMatch = compoundRegex.find(normalized)
         if (compoundMatch != null) {
             val unitWord = compoundMatch.groupValues[1]
@@ -363,15 +425,13 @@ object EgyptianArabicLocalParser {
                 return ExtractedAmount(
                     minorUnits = kotlin.math.round(total * 100).toLong(),
                     matchedSpan = compoundMatch.value,
+                    currencyCode = detectCurrencyInSpan(compoundMatch.value),
                     fromWords = true
                 )
             }
         }
 
         // 2. Check explicit numeric figures with optional 'بـ' or currency (e.g. "بـ300 جنيه", "45 جنيه")
-        val explicitCurrencyNumericRegex = Regex(
-            """(?:بـ?\s*)?(\d+(?:\.\d{1,2})?)\s*(?:ونص|و\s*نص)?\s*(?:جنيه|ج\.م|جنية|ريال|دولار|درهم|يورو|EGP|SAR|USD|AED|EUR)"""
-        )
         val explicitMatch = explicitCurrencyNumericRegex.find(normalized)
         if (explicitMatch != null) {
             val baseVal = explicitMatch.groupValues[1].toDoubleOrNull() ?: 0.0
@@ -387,13 +447,6 @@ object EgyptianArabicLocalParser {
         }
 
         // 3. Single Arabic number word with 'بـ' or 'جنيه' (e.g. "بعشرين جنيه", "عشرين جنيه", "بعشرة جنيه")
-        val singleWordKeys = numberWordsMap.keys
-            .filter { it != "جنيه" }
-            .sortedByDescending { it.length }
-            .joinToString("|") { Regex.escape(it) }
-        val wordAmountRegex = Regex(
-            """(?:بـ?\s*($singleWordKeys)(?:\s+ونص|\s+وربع)?(?:\s*(?:جنيه|ج\.م|جنية))?)|(?:($singleWordKeys)(?:\s+ونص|\s+وربع)?\s*(?:جنيه|ج\.م|جنية))"""
-        )
         val wordMatch = wordAmountRegex.find(normalized)
         if (wordMatch != null) {
             val word = wordMatch.groupValues[1].ifEmpty { wordMatch.groupValues[2] }
@@ -414,7 +467,6 @@ object EgyptianArabicLocalParser {
         }
 
         // 4. Number prefixed with بـ or ب (e.g., "بـ 300", "ب20")
-        val biNumberRegex = Regex("""بـ?\s*(\d+(?:\.\d{1,2})?)""")
         val biMatch = biNumberRegex.find(normalized)
         if (biMatch != null) {
             val value = biMatch.groupValues[1].toDoubleOrNull() ?: 0.0
@@ -427,7 +479,6 @@ object EgyptianArabicLocalParser {
         }
 
         // 5. Shorthand line item: "<description> <number>" (e.g. "طماطم 20", "دفعت إيجار 2000")
-        val trailingOrStandaloneNumber = Regex("""(?:^|\s)(\d+(?:\.\d{1,2})?)(?:\s*$)""")
         val trailingMatch = trailingOrStandaloneNumber.find(normalized.trim())
         if (trailingMatch != null) {
             val value = trailingMatch.groupValues[1].toDoubleOrNull() ?: 0.0
@@ -446,9 +497,9 @@ object EgyptianArabicLocalParser {
         val upper = span.uppercase(Locale.US)
         return when {
             upper.contains("USD") || span.contains("دولار") || span.contains("$") -> "USD"
-            upper.contains("SAR") || span.contains("ريال") -> "SAR"
-            upper.contains("AED") || span.contains("درهم") -> "AED"
-            upper.contains("EUR") || span.contains("يورو") -> "EUR"
+            upper.contains("SAR") || span.contains("ريال") || span.contains("ر.س") -> "SAR"
+            upper.contains("AED") || span.contains("درهم") || span.contains("د.إ") -> "AED"
+            upper.contains("EUR") || span.contains("يورو") || span.contains("€") -> "EUR"
             upper.contains("EGP") || span.contains("جنيه") || span.contains("ج.م") -> "EGP"
             else -> null
         }
@@ -460,23 +511,42 @@ object EgyptianArabicLocalParser {
             cleaned = cleaned.replaceFirst(matchedAmountSpan, " ")
         }
         // Remove residual standalone currency words using Unicode-safe whitespace boundaries
-        cleaned = cleaned.replace(Regex("""(?:^|\s)(?:جنيه|جنية|ج\.م|EGP|USD|SAR)(?=\s|$)"""), " ")
-        for (verb in (expenseActionPrefixes + listOf("قبضت", "استلمت", "جالي"))) {
-            cleaned = cleaned.replace(Regex("""^\s*$verb\s+(?:على\s+|في\s+)?"""), "")
+        cleaned = cleaned.replace(residualCurrencyRegex, " ")
+        for (verbRegex in leadingActionVerbRegexes) {
+            cleaned = cleaned.replace(verbRegex, "")
         }
-        cleaned = cleaned.replace(Regex("""^(?:على|في|بـ|ب)\s+"""), "")
-        cleaned = cleaned.replace(Regex("""\s+بـ?\s*$"""), "")
-        return cleaned.replace(Regex("""\s+"""), " ").trim()
+        cleaned = cleaned.replace(leadingPrepositionRegex, "")
+        cleaned = cleaned.replace(trailingBiRegex, "")
+        return cleaned.replace(whitespaceRegex, " ").trim()
     }
 
     fun detectTransactionType(text: String): TransactionType {
         val lower = text.lowercase(Locale.ROOT)
         for (kw in incomeActionKeywords) {
-            if (lower.contains(kw)) {
+            if (containsWholePhrase(lower, kw)) {
                 return TransactionType.INCOME
             }
         }
         return TransactionType.EXPENSE
+    }
+
+    internal fun containsWholePhrase(text: String, phrase: String): Boolean {
+        val cleanPhrase = phrase.lowercase(Locale.ROOT).trim()
+        if (cleanPhrase.isEmpty()) return false
+        val textTokens = tokenSplitRegex.split(text.lowercase(Locale.ROOT).trim()).filter { it.isNotEmpty() }
+        val phraseTokens = tokenSplitRegex.split(cleanPhrase).filter { it.isNotEmpty() }
+        if (phraseTokens.isEmpty() || textTokens.size < phraseTokens.size) return false
+        for (i in 0..(textTokens.size - phraseTokens.size)) {
+            var allMatch = true
+            for (j in phraseTokens.indices) {
+                if (textTokens[i + j] != phraseTokens[j]) {
+                    allMatch = false
+                    break
+                }
+            }
+            if (allMatch) return true
+        }
+        return false
     }
 
     /**
@@ -498,14 +568,19 @@ object EgyptianArabicLocalParser {
         val normalizedDesc = description.lowercase(Locale.ROOT).trim()
         val normalizedFull = fullSegment.lowercase(Locale.ROOT).trim()
 
-        // 1. Check user's learned category rules first
-        for (rule in learnedRules) {
-            if (rule.transactionType == type) {
-                val kw = rule.keyword.lowercase(Locale.ROOT).trim()
-                if (kw.isNotEmpty() && (normalizedDesc == kw || normalizedDesc.contains(kw) || normalizedFull.contains(kw))) {
-                    val cat = byId[rule.categoryId]
-                    if (cat != null) return cat
-                }
+        // 1. Check user's learned category rules first (whole-word/phrase boundary, min length 3, longest first)
+        val sortedValidRules = learnedRules
+            .filter { it.transactionType == type && it.keyword.trim().length >= 3 }
+            .sortedByDescending { it.keyword.trim().length }
+
+        for (rule in sortedValidRules) {
+            val kw = rule.keyword.lowercase(Locale.ROOT).trim()
+            if (normalizedDesc == kw ||
+                containsWholePhrase(normalizedDesc, kw) ||
+                containsWholePhrase(normalizedFull, kw)
+            ) {
+                val cat = byId[rule.categoryId]
+                if (cat != null) return cat
             }
         }
 
@@ -513,7 +588,10 @@ object EgyptianArabicLocalParser {
         for (cat in eligibleForType) {
             val catNameLower = cat.name.lowercase(Locale.ROOT).trim()
             if (catNameLower.isNotEmpty() && catNameLower != "أخرى" && catNameLower != "دخل آخر") {
-                if (normalizedDesc.contains(catNameLower) || normalizedFull.contains(catNameLower)) {
+                if (normalizedDesc == catNameLower ||
+                    containsWholePhrase(normalizedDesc, catNameLower) ||
+                    containsWholePhrase(normalizedFull, catNameLower)
+                ) {
                     return cat
                 }
             }
@@ -526,7 +604,7 @@ object EgyptianArabicLocalParser {
             } ?: continue
 
             for (kw in keywords) {
-                if (normalizedDesc.contains(kw) || normalizedFull.contains(kw)) {
+                if (containsWholePhrase(normalizedDesc, kw) || containsWholePhrase(normalizedFull, kw)) {
                     return matchingCategory
                 }
             }
@@ -545,7 +623,8 @@ object EgyptianArabicLocalParser {
         defaultCurrency: String,
         eligibleCategories: List<CategoryEntity>,
         learnedRules: List<CategoryRuleEntity>,
-        providerLabel: String
+        providerLabel: String,
+        refundAccountingMode: RefundAccountingMode = RefundAccountingMode.EXPENSE_OFFSET
     ): Result<AiParseResult> {
         val activeCategories = eligibleCategories.filter { !it.isArchived }
         val activeCategoryMap = activeCategories.associateBy { it.id }
@@ -587,7 +666,8 @@ object EgyptianArabicLocalParser {
                                     defaultCurrency = defaultCurrency,
                                     activeCategories = activeCategories,
                                     activeCategoryMap = activeCategoryMap,
-                                    learnedRules = learnedRules
+                                    learnedRules = learnedRules,
+                                    refundAccountingMode = refundAccountingMode
                                 )
                                 if (parsedDraft != null) {
                                     drafts.add(parsedDraft)
@@ -635,7 +715,8 @@ object EgyptianArabicLocalParser {
         defaultCurrency: String,
         activeCategories: List<CategoryEntity>,
         activeCategoryMap: Map<String, CategoryEntity>,
-        learnedRules: List<CategoryRuleEntity>
+        learnedRules: List<CategoryRuleEntity>,
+        refundAccountingMode: RefundAccountingMode
     ): ProposedTransactionDraft? {
         var description = ""
         var rawAmount = ""
@@ -690,10 +771,29 @@ object EgyptianArabicLocalParser {
 
         val amountMinor = MoneyUtils.parseAmountToMinorUnits(rawAmount)
 
+        val isRefund = type == TransactionType.INCOME && isRefundSegment(description)
+        val isRefundOffset = isRefund && refundAccountingMode == RefundAccountingMode.EXPENSE_OFFSET
+
         // If the AI model explicitly returned a non-null categoryId that is NOT in activeCategoryMap
         // (e.g. an invented ID or an archived category ID), treat it strictly as uncategorized (null)
         val verifiedCategory: CategoryEntity? = if (rawCatId != null) {
-            activeCategoryMap[rawCatId]?.takeIf { it.type == type && !it.isArchived }
+            activeCategoryMap[rawCatId]?.takeIf {
+                !it.isArchived && (it.type == type || (isRefundOffset && it.type == TransactionType.EXPENSE))
+            }
+        } else if (isRefundOffset) {
+            matchBestCategory(
+                description = description,
+                fullSegment = description,
+                type = TransactionType.EXPENSE,
+                activeCategories = activeCategories,
+                learnedRules = learnedRules
+            ) ?: matchBestCategory(
+                description = description,
+                fullSegment = description,
+                type = TransactionType.INCOME,
+                activeCategories = activeCategories,
+                learnedRules = learnedRules
+            )
         } else {
             matchBestCategory(
                 description = description,
@@ -733,7 +833,10 @@ object EgyptianArabicLocalParser {
             notes = notes,
             confidence = confidence,
             isAmbiguous = isAmbiguous,
-            ambiguityReason = ambiguityReason
+            ambiguityReason = ambiguityReason,
+            isRefundOffset = isRefundOffset,
+            suggestedCategoryId = verifiedCategory?.id,
+            userConfirmedCategory = false
         )
     }
 

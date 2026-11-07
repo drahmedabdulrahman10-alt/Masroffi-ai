@@ -60,20 +60,22 @@ data class AppPreferencesState(
     val autoSaveEnabled: Boolean = false,
     val autoSaveConfidenceThreshold: Float = 0.90f,
     val aiSummaryEnabled: Boolean = true,
-    val refundAccountingMode: RefundAccountingMode = RefundAccountingMode.INCOME_CATEGORY,
+    val refundAccountingMode: RefundAccountingMode = RefundAccountingMode.EXPENSE_OFFSET,
     val themePreference: ThemePreference = ThemePreference.SYSTEM,
     val categoriesSeeded: Boolean = false
 )
 
 class AppPreferencesRepository(
     private val context: Context,
-    val secureKeyStorage: SecureKeyStorage = SecureKeyStorage(context)
+    val secureKeyStorage: SecureKeyStorage = SecureKeyStorage(context.applicationContext),
+    private val dataStore: DataStore<Preferences> = context.applicationContext.masroofiDataStore
 ) {
 
     private object Keys {
         val CURRENCY_CODE = stringPreferencesKey("currency_code")
         val OPENING_BALANCE_MINOR = longPreferencesKey("opening_balance_minor")
         val OPENING_BALANCE_CONFIGURED = booleanPreferencesKey("opening_balance_configured")
+        val OPENING_BALANCE_CURRENCY = stringPreferencesKey("opening_balance_currency")
         val AI_ENABLED = booleanPreferencesKey("ai_enabled")
         val SELECTED_PROVIDER = stringPreferencesKey("selected_provider")
         val GEMINI_MODEL_ID = stringPreferencesKey("gemini_model_id")
@@ -84,9 +86,15 @@ class AppPreferencesRepository(
         val REFUND_MODE = stringPreferencesKey("refund_accounting_mode")
         val THEME_PREF = stringPreferencesKey("theme_preference")
         val CATEGORIES_SEEDED = booleanPreferencesKey("categories_seeded")
+
+        fun openingBalanceMinorForCurrency(currencyCode: String) =
+            longPreferencesKey("opening_balance_minor_${currencyCode.uppercase()}")
+
+        fun openingBalanceConfiguredForCurrency(currencyCode: String) =
+            booleanPreferencesKey("opening_balance_configured_${currencyCode.uppercase()}")
     }
 
-    val preferencesFlow: Flow<AppPreferencesState> = context.masroofiDataStore.data.map { prefs ->
+    val preferencesFlow: Flow<AppPreferencesState> = dataStore.data.map { prefs ->
         val code = prefs[Keys.CURRENCY_CODE] ?: "EGP"
         val currency = SupportedCurrencies.fromCode(code)
         val provider = runCatching {
@@ -94,18 +102,33 @@ class AppPreferencesRepository(
         }.getOrDefault(AiProviderType.GEMINI)
         val refundMode = runCatching {
             RefundAccountingMode.valueOf(
-                prefs[Keys.REFUND_MODE] ?: RefundAccountingMode.INCOME_CATEGORY.name
+                prefs[Keys.REFUND_MODE] ?: RefundAccountingMode.EXPENSE_OFFSET.name
             )
-        }.getOrDefault(RefundAccountingMode.INCOME_CATEGORY)
+        }.getOrDefault(RefundAccountingMode.EXPENSE_OFFSET)
         val themePref = runCatching {
             ThemePreference.valueOf(prefs[Keys.THEME_PREF] ?: ThemePreference.SYSTEM.name)
         }.getOrDefault(ThemePreference.SYSTEM)
 
+        val perCurrencyMinorKey = Keys.openingBalanceMinorForCurrency(currency.code)
+        val perCurrencyConfiguredKey = Keys.openingBalanceConfiguredForCurrency(currency.code)
+        val legacyCurrency = prefs[Keys.OPENING_BALANCE_CURRENCY] ?: "EGP"
+
+        val openingBalanceMinor = when {
+            prefs.contains(perCurrencyMinorKey) -> prefs[perCurrencyMinorKey] ?: 0L
+            currency.code.equals(legacyCurrency, ignoreCase = true) -> prefs[Keys.OPENING_BALANCE_MINOR] ?: 0L
+            else -> 0L
+        }
+        val openingBalanceConfigured = when {
+            prefs.contains(perCurrencyConfiguredKey) -> prefs[perCurrencyConfiguredKey] ?: false
+            currency.code.equals(legacyCurrency, ignoreCase = true) -> prefs[Keys.OPENING_BALANCE_CONFIGURED] ?: false
+            else -> false
+        }
+
         AppPreferencesState(
             currencyCode = currency.code,
             currencySymbol = currency.symbol,
-            openingBalanceMinorUnits = prefs[Keys.OPENING_BALANCE_MINOR] ?: 0L,
-            openingBalanceConfigured = prefs[Keys.OPENING_BALANCE_CONFIGURED] ?: false,
+            openingBalanceMinorUnits = openingBalanceMinor,
+            openingBalanceConfigured = openingBalanceConfigured,
             aiEnabled = prefs[Keys.AI_ENABLED] ?: true,
             selectedProvider = provider,
             geminiModelId = prefs[Keys.GEMINI_MODEL_ID]?.takeIf { it.isNotBlank() }
@@ -126,20 +149,27 @@ class AppPreferencesRepository(
 
     suspend fun setCurrency(currencyCode: String) {
         val valid = SupportedCurrencies.fromCode(currencyCode)
-        context.masroofiDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.CURRENCY_CODE] = valid.code
         }
     }
 
     suspend fun setOpeningBalance(minorUnits: Long) {
-        context.masroofiDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
+            val currentCurrency = SupportedCurrencies.fromCode(prefs[Keys.CURRENCY_CODE] ?: "EGP").code
+            prefs[Keys.openingBalanceMinorForCurrency(currentCurrency)] = minorUnits
+            prefs[Keys.openingBalanceConfiguredForCurrency(currentCurrency)] = true
             prefs[Keys.OPENING_BALANCE_MINOR] = minorUnits
             prefs[Keys.OPENING_BALANCE_CONFIGURED] = true
+            prefs[Keys.OPENING_BALANCE_CURRENCY] = currentCurrency
         }
     }
 
     suspend fun clearOpeningBalance() {
-        context.masroofiDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
+            val currentCurrency = SupportedCurrencies.fromCode(prefs[Keys.CURRENCY_CODE] ?: "EGP").code
+            prefs[Keys.openingBalanceMinorForCurrency(currentCurrency)] = 0L
+            prefs[Keys.openingBalanceConfiguredForCurrency(currentCurrency)] = false
             prefs[Keys.OPENING_BALANCE_MINOR] = 0L
             prefs[Keys.OPENING_BALANCE_CONFIGURED] = false
         }
@@ -154,7 +184,7 @@ class AppPreferencesRepository(
         autoSaveConfidence: Float,
         aiSummaryEnabled: Boolean
     ) {
-        context.masroofiDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.AI_ENABLED] = aiEnabled
             prefs[Keys.SELECTED_PROVIDER] = provider.name
             prefs[Keys.GEMINI_MODEL_ID] = geminiModelId.trim().ifEmpty { "gemini-2.5-flash" }
@@ -167,19 +197,19 @@ class AppPreferencesRepository(
     }
 
     suspend fun setRefundAccountingMode(mode: RefundAccountingMode) {
-        context.masroofiDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.REFUND_MODE] = mode.name
         }
     }
 
     suspend fun setThemePreference(theme: ThemePreference) {
-        context.masroofiDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.THEME_PREF] = theme.name
         }
     }
 
     suspend fun markCategoriesSeeded() {
-        context.masroofiDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.CATEGORIES_SEEDED] = true
         }
     }
@@ -191,10 +221,13 @@ class AppPreferencesRepository(
         refundMode: RefundAccountingMode
     ) {
         val valid = SupportedCurrencies.fromCode(currencyCode)
-        context.masroofiDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[Keys.CURRENCY_CODE] = valid.code
+            prefs[Keys.openingBalanceMinorForCurrency(valid.code)] = openingBalanceMinorUnits
+            prefs[Keys.openingBalanceConfiguredForCurrency(valid.code)] = openingBalanceConfigured
             prefs[Keys.OPENING_BALANCE_MINOR] = openingBalanceMinorUnits
             prefs[Keys.OPENING_BALANCE_CONFIGURED] = openingBalanceConfigured
+            prefs[Keys.OPENING_BALANCE_CURRENCY] = valid.code
             prefs[Keys.REFUND_MODE] = refundMode.name
             prefs[Keys.CATEGORIES_SEEDED] = true
         }

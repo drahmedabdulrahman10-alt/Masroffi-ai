@@ -19,6 +19,30 @@ object MoneyUtils {
     private val arabicDigits = charArrayOf('٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩')
     private val persianDigits = charArrayOf('۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹')
 
+    private val currencyTokensRegex = Regex(
+        """(?i)(?:ج\.م|جنيه|جنية|ر\.س|ريال|د\.إ|درهم|دولار|يورو|EGP|SAR|AED|USD|EUR|\$|€)"""
+    )
+    private val isoDateFormatRegex = Regex("""^\d{4}-\d{2}-\d{2}$""")
+
+    private val isoDateFormatterThreadLocal = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue(): SimpleDateFormat =
+            SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+                isLenient = false
+            }
+    }
+
+    private val yearMonthFormatterThreadLocal = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue(): SimpleDateFormat =
+            SimpleDateFormat("yyyy-MM", Locale.US).apply {
+                isLenient = false
+            }
+    }
+
+    private val majorNumberFormatterThreadLocal = object : ThreadLocal<DecimalFormat>() {
+        override fun initialValue(): DecimalFormat =
+            DecimalFormat("#,##0", DecimalFormatSymbols(Locale.US))
+    }
+
     /**
      * Converts Eastern Arabic and Persian numerals as well as Arabic decimal separators
      * into standard Western ASCII digits and decimal points.
@@ -41,16 +65,15 @@ object MoneyUtils {
 
     /**
      * Parses a user-entered or AI-generated amount string into integer minor units (100 = 1.00).
-     * Returns null if invalid, zero, negative, or overflowed.
+     * Supports all app currency symbols/codes (EGP, SAR, AED, USD, EUR) and returns null if
+     * invalid, zero, negative, or overflowed.
      */
     fun parseAmountToMinorUnits(rawInput: String?): Long? {
         if (rawInput.isNullOrBlank()) return null
         val cleaned = normalizeDigits(rawInput.trim())
             .replace(",", "")
+            .replace(currencyTokensRegex, "")
             .replace(" ", "")
-            .replace("ج.م", "")
-            .replace("جنيه", "")
-            .replace("EGP", "", ignoreCase = true)
             .trim()
         if (cleaned.isEmpty()) return null
         return try {
@@ -73,6 +96,7 @@ object MoneyUtils {
         if (rawInput.isNullOrBlank()) return null
         val cleaned = normalizeDigits(rawInput.trim())
             .replace(",", "")
+            .replace(currencyTokensRegex, "")
             .replace(" ", "")
             .trim()
         if (cleaned.isEmpty()) return null
@@ -99,8 +123,8 @@ object MoneyUtils {
         val major = absMinor / 100
         val fraction = absMinor % 100
 
-        val symbols = DecimalFormatSymbols(Locale.US)
-        val majorFormatter = DecimalFormat("#,##0", symbols)
+        val majorFormatter = majorNumberFormatterThreadLocal.get()
+            ?: DecimalFormat("#,##0", DecimalFormatSymbols(Locale.US))
         val formattedMajor = majorFormatter.format(major)
 
         val numberPart = if (fraction == 0L) {
@@ -134,28 +158,27 @@ object MoneyUtils {
     }
 
     fun todayIsoDate(nowMillis: Long = System.currentTimeMillis()): String {
-        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val sdf = isoDateFormatterThreadLocal.get() ?: SimpleDateFormat("yyyy-MM-dd", Locale.US)
         return sdf.format(Date(nowMillis))
     }
 
     fun epochMillisToIsoDate(epochMillis: Long): String {
-        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val sdf = isoDateFormatterThreadLocal.get() ?: SimpleDateFormat("yyyy-MM-dd", Locale.US)
         return sdf.format(Date(epochMillis))
     }
 
     fun formatArabicReadableDate(epochMillis: Long): String {
-        val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val sdf = isoDateFormatterThreadLocal.get() ?: SimpleDateFormat("yyyy-MM-dd", Locale.US)
         return sdf.format(Date(epochMillis))
     }
 
     fun isoDateToEpochMillis(isoDate: String?): Long? {
         if (isoDate.isNullOrBlank()) return null
         val normalized = normalizeDigits(isoDate.trim())
-        if (!Regex("""^\d{4}-\d{2}-\d{2}$""").matches(normalized)) return null
+        if (!isoDateFormatRegex.matches(normalized)) return null
         return try {
-            val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
-                isLenient = false
-            }
+            val sdf = isoDateFormatterThreadLocal.get()
+                ?: SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { isLenient = false }
             sdf.parse(normalized)?.time
         } catch (e: Exception) {
             null
@@ -163,12 +186,12 @@ object MoneyUtils {
     }
 
     fun currentYearMonth(nowMillis: Long = System.currentTimeMillis()): String {
-        val sdf = SimpleDateFormat("yyyy-MM", Locale.US)
+        val sdf = yearMonthFormatterThreadLocal.get() ?: SimpleDateFormat("yyyy-MM", Locale.US)
         return sdf.format(Date(nowMillis))
     }
 
     fun yearMonthFromMillis(epochMillis: Long): String {
-        val sdf = SimpleDateFormat("yyyy-MM", Locale.US)
+        val sdf = yearMonthFormatterThreadLocal.get() ?: SimpleDateFormat("yyyy-MM", Locale.US)
         return sdf.format(Date(epochMillis))
     }
 

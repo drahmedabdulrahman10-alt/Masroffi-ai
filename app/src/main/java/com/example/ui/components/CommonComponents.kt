@@ -77,6 +77,7 @@ import com.example.data.local.CategoryEntity
 import com.example.data.local.TransactionEntity
 import com.example.data.local.TransactionSource
 import com.example.data.local.TransactionType
+import com.example.data.preferences.SupportedCurrencies
 import com.example.domain.CategoryBreakdownItem
 import com.example.domain.DailySpendingPoint
 import com.example.domain.MoneyUtils
@@ -237,10 +238,17 @@ fun TransactionItemCard(
 
             Column(horizontalAlignment = Alignment.End) {
                 val signedMinor = if (isIncome) transaction.amountMinorUnits else -transaction.amountMinorUnits
+                val txCurrencySymbol = remember(transaction.currencyCode, currencySymbol) {
+                    if (transaction.currencyCode.isNotBlank()) {
+                        SupportedCurrencies.fromCode(transaction.currencyCode).symbol
+                    } else {
+                        currencySymbol
+                    }
+                }
                 Text(
                     text = MoneyUtils.formatMinorUnits(
                         minorUnits = signedMinor,
-                        currencySymbol = currencySymbol,
+                        currencySymbol = txCurrencySymbol,
                         showPlusSign = true
                     ),
                     style = MaterialTheme.typography.titleMedium,
@@ -464,31 +472,38 @@ fun ManualTransactionDialog(
         isRefundOffset: Boolean
     ) -> Unit
 ) {
-    var selectedType by rememberSaveable {
+    val dialogKey = existingTransaction?.id ?: "new_${initialType.name}"
+    val effectiveCurrencySymbol = remember(existingTransaction?.currencyCode, currencySymbol) {
+        existingTransaction?.currencyCode?.takeIf { it.isNotBlank() }?.let {
+            SupportedCurrencies.fromCode(it).symbol
+        } ?: currencySymbol
+    }
+
+    var selectedType by rememberSaveable(dialogKey) {
         mutableStateOf(existingTransaction?.type ?: initialType)
     }
-    var description by rememberSaveable {
+    var description by rememberSaveable(dialogKey) {
         mutableStateOf(existingTransaction?.description ?: "")
     }
-    var amountText by rememberSaveable {
+    var amountText by rememberSaveable(dialogKey) {
         mutableStateOf(
             existingTransaction?.let { MoneyUtils.formatPlainMajorAmount(it.amountMinorUnits) } ?: ""
         )
     }
-    var isoDate by rememberSaveable {
+    var isoDate by rememberSaveable(dialogKey) {
         mutableStateOf(
             existingTransaction?.let { MoneyUtils.epochMillisToIsoDate(it.transactionDate) }
                 ?: MoneyUtils.todayIsoDate()
         )
     }
-    var notes by rememberSaveable {
+    var notes by rememberSaveable(dialogKey) {
         mutableStateOf(existingTransaction?.notes ?: "")
     }
-    var isRefundOffset by rememberSaveable {
+    var isRefundOffset by rememberSaveable(dialogKey) {
         mutableStateOf(existingTransaction?.isRefundOffset ?: false)
     }
 
-    val eligibleCategories = remember(categories, selectedType, isRefundOffset) {
+    val eligibleCategories = remember(categories, selectedType, isRefundOffset, existingTransaction?.categoryId) {
         val targetType = if (selectedType == TransactionType.INCOME && isRefundOffset) {
             TransactionType.EXPENSE
         } else {
@@ -499,7 +514,7 @@ fun ManualTransactionDialog(
         }
     }
 
-    var selectedCategoryId by rememberSaveable {
+    var selectedCategoryId by rememberSaveable(dialogKey) {
         mutableStateOf(
             existingTransaction?.categoryId ?: eligibleCategories.firstOrNull()?.id
         )
@@ -572,7 +587,7 @@ fun ManualTransactionDialog(
                         amountText = it
                         errorMessage = null
                     },
-                    label = { Text("المبلغ ($currencySymbol)") },
+                    label = { Text("المبلغ ($effectiveCurrencySymbol)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true,
                     modifier = Modifier

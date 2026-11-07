@@ -40,6 +40,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -58,6 +59,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,12 +69,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.data.local.CategoryEntity
 import com.example.data.local.TransactionType
+import com.example.data.preferences.SupportedCurrencies
 import com.example.domain.MoneyUtils
 import com.example.domain.ai.ProposedTransactionDraft
 import com.example.ui.speech.MasroofiSpeechHelper
 import com.example.ui.speech.SpeechRecognitionState
+import com.example.ui.theme.ExpenseRedLight
+import com.example.ui.theme.IncomeGreenLight
 import com.example.ui.theme.WarningAmberLight
 import com.example.ui.viewmodel.MasroofiUiState
 
@@ -92,6 +98,8 @@ fun AiEntrySheetScreen(
     BackHandler { onClose() }
 
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val currentOnAppendSpeechText by rememberUpdatedState(onAppendSpeechText)
     var speechState by remember { mutableStateOf(SpeechRecognitionState()) }
 
     val speechHelper = remember(context) {
@@ -99,13 +107,15 @@ fun AiEntrySheetScreen(
             context = context,
             onStateChanged = { speechState = it },
             onFinalTextRecognized = { recognized ->
-                onAppendSpeechText(recognized)
+                currentOnAppendSpeechText(recognized)
             }
         )
     }
 
-    DisposableEffect(Unit) {
+    DisposableEffect(lifecycleOwner, speechHelper) {
+        lifecycleOwner.lifecycle.addObserver(speechHelper)
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(speechHelper)
             speechHelper.stopListening()
         }
     }
@@ -434,7 +444,18 @@ fun AiEntrySheetScreen(
             // Transaction Preview / Review Section
             val parseResult = uiState.aiParseResult
             if (parseResult != null && parseResult.proposals.isNotEmpty()) {
-                val totalMinor = parseResult.proposals.sumOf { it.amountMinorUnits ?: 0L }
+                val expenseTotalsByCurrency = parseResult.proposals
+                    .filter { it.type == TransactionType.EXPENSE }
+                    .groupBy { it.currencyCode }
+                    .mapValues { (_, list) -> list.sumOf { it.amountMinorUnits ?: 0L } }
+                    .filterValues { it > 0L }
+
+                val incomeTotalsByCurrency = parseResult.proposals
+                    .filter { it.type == TransactionType.INCOME }
+                    .groupBy { it.currencyCode }
+                    .mapValues { (_, list) -> list.sumOf { it.amountMinorUnits ?: 0L } }
+                    .filterValues { it > 0L }
+
                 val allValid = parseResult.proposals.all { it.isValidToSave }
 
                 item {
@@ -450,22 +471,37 @@ fun AiEntrySheetScreen(
                             modifier = Modifier.padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                            Text(
+                                text = "مراجعة المعاملات المقترحة (${parseResult.proposals.size})",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Text(
-                                    text = "مراجعة المعاملات المقترحة (${parseResult.proposals.size})",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "الإجمالي: ${MoneyUtils.formatMinorUnits(totalMinor, uiState.preferences.currencySymbol)}",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
+                                if (expenseTotalsByCurrency.isNotEmpty()) {
+                                    val formattedExpenses = expenseTotalsByCurrency.entries.joinToString(" + ") { (code, minor) ->
+                                        MoneyUtils.formatMinorUnits(minor, SupportedCurrencies.fromCode(code).symbol)
+                                    }
+                                    Text(
+                                        text = "إجمالي المصروفات: $formattedExpenses",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ExpenseRedLight
+                                    )
+                                }
+                                if (incomeTotalsByCurrency.isNotEmpty()) {
+                                    val formattedIncome = incomeTotalsByCurrency.entries.joinToString(" + ") { (code, minor) ->
+                                        MoneyUtils.formatMinorUnits(minor, SupportedCurrencies.fromCode(code).symbol)
+                                    }
+                                    Text(
+                                        text = "إجمالي الدخل/الاسترداد: $formattedIncome",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = IncomeGreenLight
+                                    )
+                                }
                             }
                             Text(
                                 text = "المصدر: ${parseResult.providerSourceLabel} • لا يتم تعديل رصيدك إلا بعد الضغط على (حفظ الكل).",
@@ -491,7 +527,6 @@ fun AiEntrySheetScreen(
                     ProposedDraftEditorCard(
                         draft = draft,
                         activeCategories = activeCategories,
-                        currencySymbol = uiState.preferences.currencySymbol,
                         onUpdateDraft = onUpdateDraft,
                         onRemoveDraft = { onRemoveDraft(draft.draftId) }
                     )
@@ -540,12 +575,18 @@ fun AiEntrySheetScreen(
 private fun ProposedDraftEditorCard(
     draft: ProposedTransactionDraft,
     activeCategories: List<CategoryEntity>,
-    currencySymbol: String,
     onUpdateDraft: (ProposedTransactionDraft) -> Unit,
     onRemoveDraft: () -> Unit
 ) {
-    val eligibleForType = remember(activeCategories, draft.type) {
-        activeCategories.filter { it.type == draft.type }
+    val eligibleForType = remember(activeCategories, draft.type, draft.isRefundOffset) {
+        if (draft.type == TransactionType.INCOME && draft.isRefundOffset) {
+            activeCategories.filter { it.type == TransactionType.EXPENSE || it.type == TransactionType.INCOME }
+        } else {
+            activeCategories.filter { it.type == draft.type }
+        }
+    }
+    val draftCurrencySymbol = remember(draft.currencyCode) {
+        SupportedCurrencies.fromCode(draft.currencyCode).symbol
     }
 
     Card(
@@ -572,7 +613,14 @@ private fun ProposedDraftEditorCard(
                         onClick = {
                             val newCat = activeCategories
                                 .firstOrNull { it.type == TransactionType.EXPENSE }?.id
-                            onUpdateDraft(draft.copy(type = TransactionType.EXPENSE, categoryId = newCat))
+                            onUpdateDraft(
+                                draft.copy(
+                                    type = TransactionType.EXPENSE,
+                                    categoryId = newCat,
+                                    isRefundOffset = false,
+                                    userConfirmedCategory = true
+                                )
+                            )
                         },
                         label = { Text("مصروف") }
                     )
@@ -581,7 +629,13 @@ private fun ProposedDraftEditorCard(
                         onClick = {
                             val newCat = activeCategories
                                 .firstOrNull { it.type == TransactionType.INCOME }?.id
-                            onUpdateDraft(draft.copy(type = TransactionType.INCOME, categoryId = newCat))
+                            onUpdateDraft(
+                                draft.copy(
+                                    type = TransactionType.INCOME,
+                                    categoryId = newCat,
+                                    userConfirmedCategory = true
+                                )
+                            )
                         },
                         label = { Text("دخل") }
                     )
@@ -643,7 +697,7 @@ private fun ProposedDraftEditorCard(
                 OutlinedTextField(
                     value = draft.amountText,
                     onValueChange = { onUpdateDraft(draft.copy(amountText = it)) },
-                    label = { Text("المبلغ ($currencySymbol)") },
+                    label = { Text("المبلغ ($draftCurrencySymbol)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true,
                     isError = draft.amountMinorUnits == null || draft.amountMinorUnits <= 0L,
@@ -659,6 +713,24 @@ private fun ProposedDraftEditorCard(
                 modifier = Modifier.fillMaxWidth()
             )
 
+            if (draft.type == TransactionType.INCOME) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Checkbox(
+                        checked = draft.isRefundOffset,
+                        onCheckedChange = { checked ->
+                            onUpdateDraft(draft.copy(isRefundOffset = checked))
+                        }
+                    )
+                    Text(
+                        text = "هذه المعاملة استرداد لمصروف سابق (تخصم من المصروفات عند تفعيل خيار الاسترداد)",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
             Text(
                 text = "التصنيف (عند تعديله يتذكر التطبيق اختيارك مستقبلاً):",
                 style = MaterialTheme.typography.labelMedium
@@ -670,13 +742,13 @@ private fun ProposedDraftEditorCard(
             ) {
                 FilterChip(
                     selected = draft.categoryId == null,
-                    onClick = { onUpdateDraft(draft.copy(categoryId = null)) },
+                    onClick = { onUpdateDraft(draft.copy(categoryId = null, userConfirmedCategory = false)) },
                     label = { Text("غير مصنف") }
                 )
                 eligibleForType.forEach { cat ->
                     FilterChip(
                         selected = draft.categoryId == cat.id,
-                        onClick = { onUpdateDraft(draft.copy(categoryId = cat.id)) },
+                        onClick = { onUpdateDraft(draft.copy(categoryId = cat.id, userConfirmedCategory = true)) },
                         label = { Text(cat.name) }
                     )
                 }

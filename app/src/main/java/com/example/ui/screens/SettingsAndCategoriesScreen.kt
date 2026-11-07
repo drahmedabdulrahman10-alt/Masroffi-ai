@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -76,6 +77,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.data.local.CategoryEntity
+import com.example.data.local.RefundAccountingMode
 import com.example.data.local.TransactionType
 import com.example.data.preferences.AiProviderType
 import com.example.data.preferences.SupportedCurrencies
@@ -84,10 +86,6 @@ import com.example.data.repository.RestoreMode
 import com.example.domain.MoneyUtils
 import com.example.ui.components.CategoryIconHelper
 import com.example.ui.viewmodel.MasroofiUiState
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.nio.charset.StandardCharsets
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -95,6 +93,7 @@ fun SettingsAndCategoriesScreen(
     uiState: MasroofiUiState,
     onUpdateCurrency: (String) -> Unit,
     onUpdateTheme: (ThemePreference) -> Unit,
+    onUpdateRefundMode: (RefundAccountingMode) -> Unit = {},
     onSaveOpeningBalance: (String) -> Unit,
     onSaveMonthlyBudget: (String, String?, String) -> Unit,
     onDeleteBudget: (String) -> Unit,
@@ -104,16 +103,17 @@ fun SettingsAndCategoriesScreen(
     onSaveAiSettings: (Boolean, AiProviderType, String, String, String, Boolean, Float, Boolean) -> Unit,
     onRemoveApiKey: (AiProviderType) -> Unit,
     onTestAiConnection: (AiProviderType, String, String) -> Unit,
-    onCreateBackupJson: suspend () -> String,
+    onCreateBackupJson: suspend () -> String = { "" },
     onValidateRestoreJson: (String) -> Unit,
     onDismissBackupPreview: () -> Unit,
     onConfirmRestoreBackup: (RestoreMode) -> Unit,
-    onExportCsv: suspend () -> String,
+    onExportCsv: suspend () -> String = { "" },
+    onExportBackupToUri: (Uri) -> Unit = {},
+    onImportBackupFromUri: (Uri) -> Unit = {},
+    onExportCsvToUri: (Uri) -> Unit = {},
     onShowMessage: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val prefs = uiState.preferences
     val currency = prefs.currencySymbol
 
@@ -138,31 +138,20 @@ fun SettingsAndCategoriesScreen(
     // Category Budget Modal State
     var showCategoryBudgetModal by rememberSaveable { mutableStateOf(false) }
 
-    //Totals by Category from all saved transactions
-    val categoryTotalsMap = remember(uiState.allTransactions) {
+    // Totals by Category from saved transactions in the active currency only (never mixes currencies)
+    val categoryTotalsMap = remember(uiState.allTransactions, prefs.currencyCode) {
         uiState.allTransactions
+            .filter { it.currencyCode.equals(prefs.currencyCode, ignoreCase = true) }
             .groupBy { it.categoryId }
             .mapValues { (_, list) -> list.sumOf { it.amountMinorUnits } }
     }
 
-    // SAF Launchers for Backup & CSV Export
+    // SAF Launchers for Backup & CSV Export (executed safely inside ViewModel scope)
     val createBackupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
         if (uri != null) {
-            scope.launch {
-                try {
-                    val json = onCreateBackupJson()
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver.openOutputStream(uri)?.use { out ->
-                            out.write(json.toByteArray(StandardCharsets.UTF_8))
-                        }
-                    }
-                    onShowMessage("تم حفظ النسخة الاحتياطية (JSON) بنجاح بدون أي مفاتيح API.")
-                } catch (e: Exception) {
-                    onShowMessage("فشل تصدير النسخة الاحتياطية: ${e.message}")
-                }
-            }
+            onExportBackupToUri(uri)
         }
     }
 
@@ -170,18 +159,7 @@ fun SettingsAndCategoriesScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            scope.launch {
-                try {
-                    val content = withContext(Dispatchers.IO) {
-                        context.contentResolver.openInputStream(uri)?.bufferedReader(StandardCharsets.UTF_8)?.use {
-                            it.readText()
-                        }.orEmpty()
-                    }
-                    onValidateRestoreJson(content)
-                } catch (e: Exception) {
-                    onShowMessage("تعذر قراءة ملف النسخة الاحتياطية.")
-                }
-            }
+            onImportBackupFromUri(uri)
         }
     }
 
@@ -189,19 +167,7 @@ fun SettingsAndCategoriesScreen(
         contract = ActivityResultContracts.CreateDocument("text/csv")
     ) { uri ->
         if (uri != null) {
-            scope.launch {
-                try {
-                    val csv = onExportCsv()
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver.openOutputStream(uri)?.use { out ->
-                            out.write(csv.toByteArray(StandardCharsets.UTF_8))
-                        }
-                    }
-                    onShowMessage("تم تصدير المعاملات إلى ملف CSV بنجاح.")
-                } catch (e: Exception) {
-                    onShowMessage("فشل تصدير ملف CSV: ${e.message}")
-                }
-            }
+            onExportCsvToUri(uri)
         }
     }
 
@@ -721,6 +687,25 @@ fun SettingsAndCategoriesScreen(
                         )
                     }
 
+                    Text("طريقة محاسبة مبالغ الاسترداد (Refunds):", style = MaterialTheme.typography.labelLarge)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        FilterChip(
+                            selected = prefs.refundAccountingMode == RefundAccountingMode.EXPENSE_OFFSET,
+                            onClick = { onUpdateRefundMode(RefundAccountingMode.EXPENSE_OFFSET) },
+                            label = { Text("خصم من المصروف الأصلي") },
+                            modifier = Modifier.testTag("refund_mode_expense_offset")
+                        )
+                        FilterChip(
+                            selected = prefs.refundAccountingMode == RefundAccountingMode.INCOME_CATEGORY,
+                            onClick = { onUpdateRefundMode(RefundAccountingMode.INCOME_CATEGORY) },
+                            label = { Text("إضافة كدخل مستقل") },
+                            modifier = Modifier.testTag("refund_mode_income_category")
+                        )
+                    }
+
                     HorizontalDivider()
 
                     Row(
@@ -982,14 +967,15 @@ private fun CategoryEditDialog(
         isArchived: Boolean
     ) -> Unit
 ) {
-    var name by rememberSaveable { mutableStateOf(existingCategory?.name ?: "") }
-    var type by rememberSaveable {
+    val categoryKey = existingCategory?.id ?: "new_category"
+    var name by rememberSaveable(categoryKey) { mutableStateOf(existingCategory?.name ?: "") }
+    var type by rememberSaveable(categoryKey) {
         mutableStateOf(existingCategory?.type ?: TransactionType.EXPENSE)
     }
-    var iconName by rememberSaveable {
+    var iconName by rememberSaveable(categoryKey) {
         mutableStateOf(existingCategory?.iconName ?: "category")
     }
-    var colorHex by rememberSaveable {
+    var colorHex by rememberSaveable(categoryKey) {
         mutableLongStateOf(existingCategory?.colorHex ?: 0xFF0F766EL)
     }
 
