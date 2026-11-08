@@ -5,9 +5,9 @@ import com.example.data.local.CategoryRuleEntity
 import com.example.data.local.RefundAccountingMode
 import com.example.data.local.TransactionType
 import com.example.domain.MoneyUtils
-import com.example.domain.QuickDateOption
 import com.squareup.moshi.JsonReader
 import okio.Buffer
+import java.time.LocalDate
 import java.util.Locale
 
 /**
@@ -159,19 +159,8 @@ object EgyptianArabicLocalParser {
     private val trailingBiRegex = Regex("""\s+بـ?\s*$""")
     private val whitespaceRegex = Regex("""\s+""")
     private val tokenSplitRegex = Regex("""[^\p{L}\p{N}]+""")
-    private val embeddedIsoDateRegex = Regex("""(?<=^|\s)(\d{4}-\d{2}-\d{2})(?=\s|$|[،,.;؛])""")
-    private val dayBeforeYesterdayPhraseRegex = Regex(
-        """(?<=^|\s)(?:أول\s+أمس|اول\s+امس|أول\s+امس|اول\s+أمس|أول\s+امبارح|اول\s+امبارح|أول\s+إمبارح|اول\s+إمبارح|day\s+before\s+yesterday)(?=\s|$|[،,.;؛])""",
-        RegexOption.IGNORE_CASE
-    )
-    private val yesterdayPhraseRegex = Regex(
-        """(?<=^|\s)(?:أمس|امس|امبارح|إمبارح|البارحة|yesterday)(?=\s|$|[،,.;؛])""",
-        RegexOption.IGNORE_CASE
-    )
-    private val todayPhraseRegex = Regex(
-        """(?<=^|\s)(?:اليوم|النهارده|النهاردة|today)(?=\s|$|[،,.;؛])""",
-        RegexOption.IGNORE_CASE
-    )
+    private val danglingDatePrepositionRegex = Regex("""(?:^|\s)(?:من|منذ)\s*$""")
+    private val orphanPunctuationBeforeRegex = Regex("""\s+([،,;؛])(?=\s|$)""")
 
     private val categoryKeywordDictionary: Map<String, List<String>> = mapOf(
         "أكل وشرب" to listOf(
@@ -246,6 +235,8 @@ object EgyptianArabicLocalParser {
 
         val segments = splitIntoTransactionSegments(normalizedInput)
         val proposals = mutableListOf<ProposedTransactionDraft>()
+        // Single reference date for the whole parsing operation (deterministic and testable).
+        val referenceDate = MoneyUtils.parseIsoLocalDate(todayIsoDate)
 
         for (segment in segments) {
             val trimmed = segment.trim()
@@ -253,6 +244,7 @@ object EgyptianArabicLocalParser {
             val draft = parseSingleSegment(
                 segment = trimmed,
                 todayIsoDate = todayIsoDate,
+                referenceDate = referenceDate,
                 defaultCurrency = defaultCurrency,
                 activeCategories = activeCategories,
                 learnedRules = learnedRules,
@@ -266,7 +258,7 @@ object EgyptianArabicLocalParser {
         val hasAmbiguous = proposals.any { it.isAmbiguous || it.amountMinorUnits == null }
         val clarification = when {
             proposals.isEmpty() -> "لم نتمكن من استخراج معاملات مالية واضحة. يرجى توضيح الصنف والمبلغ."
-            hasAmbiguous -> "بعض المعاملات تحتاج إلى تأكيد المبلغ أو التصنيف قبل الحفظ."
+            hasAmbiguous -> "بعض المعاملات تحتاج إلى تأكيد المبلغ أو التصنيف أو التاريخ قبل الحفظ."
             else -> null
         }
 
@@ -338,70 +330,56 @@ object EgyptianArabicLocalParser {
         return refundKeywords.any { containsWholePhrase(lower, it) }
     }
 
-    private data class ExtractedDate(
-        val isoDate: String,
-        val matchedSpan: String
-    )
-
-    private fun extractSegmentDate(segment: String, todayIsoDate: String): ExtractedDate? {
-        val normalized = MoneyUtils.normalizeDigits(segment)
-        val referenceDate = MoneyUtils.parseIsoLocalDate(todayIsoDate) ?: return null
-
-        val isoMatch = embeddedIsoDateRegex.find(normalized)
-        if (isoMatch != null) {
-            val parsed = MoneyUtils.parseIsoLocalDate(isoMatch.groupValues[1])
-            if (parsed != null) {
-                return ExtractedDate(
-                    isoDate = MoneyUtils.formatLocalDateToIso(parsed),
-                    matchedSpan = isoMatch.value
-                )
-            }
-        }
-
-        val dayBeforeMatch = dayBeforeYesterdayPhraseRegex.find(normalized)
-        if (dayBeforeMatch != null) {
-            val resolved = MoneyUtils.resolveQuickDate(QuickDateOption.DAY_BEFORE_YESTERDAY, referenceDate)
-            return ExtractedDate(
-                isoDate = MoneyUtils.formatLocalDateToIso(resolved),
-                matchedSpan = dayBeforeMatch.value
-            )
-        }
-
-        val yesterdayMatch = yesterdayPhraseRegex.find(normalized)
-        if (yesterdayMatch != null) {
-            val resolved = MoneyUtils.resolveQuickDate(QuickDateOption.YESTERDAY, referenceDate)
-            return ExtractedDate(
-                isoDate = MoneyUtils.formatLocalDateToIso(resolved),
-                matchedSpan = yesterdayMatch.value
-            )
-        }
-
-        val todayMatch = todayPhraseRegex.find(normalized)
-        if (todayMatch != null) {
-            val resolved = MoneyUtils.resolveQuickDate(QuickDateOption.TODAY, referenceDate)
-            return ExtractedDate(
-                isoDate = MoneyUtils.formatLocalDateToIso(resolved),
-                matchedSpan = todayMatch.value
-            )
-        }
-
-        return null
+    /**
+     * Removes exactly the matched date expression from the (already digit-normalized) segment,
+     * together with a dangling leading "من"/"منذ" (e.g. "من يوم الخميس"), and collapses whitespace
+     * and orphaned punctuation without touching the amount, currency, or description words.
+     */
+    private fun removeDateSpan(normalizedSegment: String, matchedSpan: String): String {
+        val idx = normalizedSegment.indexOf(matchedSpan)
+        if (idx < 0) return normalizedSegment
+        var prefix = normalizedSegment.substring(0, idx)
+        val suffix = normalizedSegment.substring(idx + matchedSpan.length)
+        prefix = prefix.replace(danglingDatePrepositionRegex, " ")
+        return "$prefix $suffix"
+            .replace(orphanPunctuationBeforeRegex, "$1")
+            .replace(whitespaceRegex, " ")
+            .trim()
+            .trim(',', '،', '؛', ';', '.')
+            .trim()
     }
 
     private fun parseSingleSegment(
         segment: String,
         todayIsoDate: String,
+        referenceDate: LocalDate?,
         defaultCurrency: String,
         activeCategories: List<CategoryEntity>,
         learnedRules: List<CategoryRuleEntity>,
         refundAccountingMode: RefundAccountingMode
     ): ProposedTransactionDraft? {
         val txType = detectTransactionType(segment)
-        val extractedDate = extractSegmentDate(segment, todayIsoDate)
-        val segmentWithoutDate = if (extractedDate != null) {
-            MoneyUtils.normalizeDigits(segment).replaceFirst(extractedDate.matchedSpan, " ").trim()
+        // Date interpretation runs BEFORE amount extraction so numbers inside date expressions
+        // (e.g. "من 3 أيام", "يوم 15 الشهر اللي فات", "2025-02-29") are never mistaken for amounts.
+        val normalizedSegment = MoneyUtils.normalizeDigits(segment)
+        val dateResolution = referenceDate?.let {
+            EgyptianArabicDateResolver.resolveDate(
+                segment = normalizedSegment,
+                referenceDate = it,
+                isAlreadyNormalized = true
+            )
+        }
+        val segmentWithoutDate = if (dateResolution != null) {
+            removeDateSpan(normalizedSegment, dateResolution.matchedSpan)
         } else {
             segment
+        }
+        val resolvedIsoDate = dateResolution?.takeIf { it.isResolved }?.resolvedIsoDate
+        val dateNeedsConfirmation = dateResolution != null && resolvedIsoDate == null
+        val dateAmbiguityReason = if (dateNeedsConfirmation) {
+            dateResolution?.diagnosticMessage ?: "التاريخ المذكور غير محدد بيوم دقيق، يرجى تحديد التاريخ"
+        } else {
+            null
         }
         val extractedAmount = extractMonetaryAmount(segmentWithoutDate)
         val cleanDescription = extractCleanDescription(segmentWithoutDate, extractedAmount?.matchedSpan)
@@ -448,6 +426,7 @@ object EgyptianArabicLocalParser {
         val isAmbiguousCategory = matchedCategory == null
         val confidence = when {
             isAmbiguousAmount -> 0.40f
+            dateNeedsConfirmation -> 0.55f
             isAmbiguousCategory -> 0.65f
             extractedAmount?.fromWords == true -> 0.92f
             else -> 0.96f
@@ -456,6 +435,7 @@ object EgyptianArabicLocalParser {
         val ambiguityReason = when {
             amountMinor == null || amountMinor <= 0L -> "المبلغ غير محدد أو غير واضح"
             extractedAmount.isUncertain -> "يرجى تأكيد قيمة المبلغ"
+            dateNeedsConfirmation -> dateAmbiguityReason
             isAmbiguousCategory -> "لم يتم العثور على تصنيف مطابق، يرجى اختيار التصنيف"
             else -> null
         }
@@ -470,17 +450,21 @@ object EgyptianArabicLocalParser {
             amountMinorUnits = amountMinor,
             currencyCode = extractedAmount?.currencyCode ?: defaultCurrency,
             type = txType,
-            isoDate = extractedDate?.isoDate ?: todayIsoDate,
+            // Ambiguous/invalid date expressions never invent a date: keep today as an explicit
+            // placeholder that the user must confirm individually (dateNeedsConfirmation = true).
+            isoDate = resolvedIsoDate ?: todayIsoDate,
             categoryId = matchedCategory?.id,
             notes = "",
             confidence = confidence,
-            isAmbiguous = isAmbiguousAmount || isAmbiguousCategory,
+            isAmbiguous = isAmbiguousAmount || isAmbiguousCategory || dateNeedsConfirmation,
             ambiguityReason = ambiguityReason,
             isRefundOffset = isRefundOffset,
             suggestedCategoryId = matchedCategory?.id,
             userConfirmedCategory = false,
-            aiDetectedDate = extractedDate != null,
-            userModifiedDate = false
+            aiDetectedDate = resolvedIsoDate != null,
+            userModifiedDate = false,
+            dateNeedsConfirmation = dateNeedsConfirmation,
+            dateAmbiguityReason = dateAmbiguityReason
         )
     }
 
@@ -933,6 +917,102 @@ object EgyptianArabicLocalParser {
             aiDetectedDate = aiDetectedDate,
             userModifiedDate = false
         )
+    }
+
+    /**
+     * Reconciles dates in a remote AI provider result with the deterministic local date resolution
+     * of the same user text, so a remote model can never silently override a date that Masroofi's
+     * local Egyptian Arabic resolver computed deterministically.
+     *
+     * Conflict-resolution rules (per matched remote draft):
+     * 1. Local resolved a specific date (aiDetectedDate = true) -> the local date always wins.
+     * 2. Local found only a period / vague / invalid expression (dateNeedsConfirmation = true) ->
+     *    the remote date is discarded (it would be invented), today's date is kept as a placeholder,
+     *    and the draft is flagged for individual date confirmation.
+     * 3. Local found no date expression and the remote date equals today -> treated as the default
+     *    date (aiDetectedDate = false) so the batch-level default date can still apply.
+     * 4. Local found no date expression and the remote date differs -> the remote date is kept
+     *    (existing behaviour) as an AI-detected date that the user can review.
+     * Unmatched remote drafts whose date conflicts with every locally resolved date are flagged
+     * for confirmation instead of being trusted silently.
+     *
+     * Matching uses list position when both parsers produced the same number of drafts; otherwise
+     * a one-to-one match on identical amount and type, then on overlapping description.
+     * This performs no network calls.
+     */
+    fun reconcileRemoteDatesWithLocal(
+        remoteResult: AiParseResult,
+        localResult: AiParseResult,
+        todayIsoDate: String
+    ): AiParseResult {
+        val remote = remoteResult.proposals
+        val local = localResult.proposals
+        if (remote.isEmpty()) return remoteResult
+
+        val matches: List<ProposedTransactionDraft?> = if (remote.size == local.size) {
+            local
+        } else {
+            val pool = local.toMutableList()
+            remote.map { r ->
+                val byAmount = pool.firstOrNull { l ->
+                    r.amountMinorUnits != null && l.amountMinorUnits == r.amountMinorUnits && l.type == r.type
+                }
+                val chosen = byAmount ?: pool.firstOrNull { l -> descriptionsOverlap(l.description, r.description) }
+                if (chosen != null) pool.remove(chosen)
+                chosen
+            }
+        }
+
+        val localResolvedDates = local.filter { it.aiDetectedDate }.map { it.isoDate }.toSet()
+        val localHasDateExpressions = local.any { it.aiDetectedDate || it.dateNeedsConfirmation }
+
+        val reconciled = remote.mapIndexed { index, r ->
+            val l = matches.getOrNull(index)
+            when {
+                l != null && l.aiDetectedDate -> r.copy(
+                    isoDate = l.isoDate,
+                    aiDetectedDate = true,
+                    dateNeedsConfirmation = false,
+                    dateAmbiguityReason = null
+                )
+                l != null && l.dateNeedsConfirmation -> r.copy(
+                    isoDate = todayIsoDate,
+                    aiDetectedDate = false,
+                    dateNeedsConfirmation = true,
+                    dateAmbiguityReason = l.dateAmbiguityReason,
+                    isAmbiguous = true,
+                    ambiguityReason = r.ambiguityReason ?: l.dateAmbiguityReason
+                )
+                l != null && r.aiDetectedDate && r.isoDate == todayIsoDate -> r.copy(aiDetectedDate = false)
+                l == null && r.aiDetectedDate && localHasDateExpressions && r.isoDate !in localResolvedDates -> {
+                    val reason = "تعذر التحقق محلياً من التاريخ الذي اقترحه الذكاء الاصطناعي، يرجى مراجعته"
+                    r.copy(
+                        dateNeedsConfirmation = true,
+                        dateAmbiguityReason = reason,
+                        isAmbiguous = true,
+                        ambiguityReason = r.ambiguityReason ?: reason
+                    )
+                }
+                else -> r
+            }
+        }
+
+        val anyAmbiguous = remoteResult.needsClarification || reconciled.any { it.isAmbiguous }
+        return remoteResult.copy(
+            proposals = reconciled,
+            needsClarification = anyAmbiguous,
+            clarificationQuestion = remoteResult.clarificationQuestion ?: if (anyAmbiguous) {
+                "يرجى مراجعة المعاملات المقترحة وتأكيد الحقول غير المكتملة قبل الحفظ."
+            } else {
+                null
+            }
+        )
+    }
+
+    private fun descriptionsOverlap(a: String, b: String): Boolean {
+        val tokensA = tokenSplitRegex.split(a.lowercase(Locale.ROOT)).filter { it.length >= 2 }.toSet()
+        if (tokensA.isEmpty()) return false
+        return tokenSplitRegex.split(b.lowercase(Locale.ROOT)).any { it.length >= 2 && it in tokensA }
     }
 
     private fun readNullableString(reader: JsonReader): String? {

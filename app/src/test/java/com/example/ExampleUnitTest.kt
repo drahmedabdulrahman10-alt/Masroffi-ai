@@ -12,6 +12,7 @@ import com.example.domain.BudgetStatus
 import com.example.domain.FinancialCalculator
 import com.example.domain.MoneyUtils
 import com.example.domain.QuickDateOption
+import com.example.domain.ai.EgyptianArabicDateResolver
 import com.example.domain.ai.EgyptianArabicLocalParser
 import com.example.domain.ai.RemoteAiProviderClient
 import java.time.LocalDate
@@ -1075,5 +1076,175 @@ class ExampleUnitTest {
             "" to "2026-11-15",
             MoneyUtils.normalizeDateRangeBounds("", "2026-11-15", isStartUpdated = false)
         )
+    }
+
+    // --- H. Task 7: Egyptian Arabic Relative Date Understanding Unit Tests ---
+
+    @Test
+    fun `EgyptianArabicDateResolver deterministically resolves relative days, weeks, months, and years with fixed reference date`() {
+        // Fixed reference date: Wednesday, November 18, 2026
+        val refDate = LocalDate.of(2026, 11, 18)
+
+        // 1. Relative Days
+        val todayRes = EgyptianArabicDateResolver.resolveDate("النهاردة", refDate)
+        assertNotNull(todayRes)
+        assertEquals(refDate, todayRes!!.resolvedDate)
+        assertEquals("2026-11-18", todayRes.resolvedIsoDate)
+
+        val yesterdayRes = EgyptianArabicDateResolver.resolveDate("امبارح", refDate)
+        assertEquals(LocalDate.of(2026, 11, 17), yesterdayRes?.resolvedDate)
+
+        val dayBeforeYesterdayRes = EgyptianArabicDateResolver.resolveDate("أول امبارح", refDate)
+        assertEquals(LocalDate.of(2026, 11, 16), dayBeforeYesterdayRes?.resolvedDate)
+
+        val twoDaysAgoRes = EgyptianArabicDateResolver.resolveDate("من يومين", refDate)
+        assertEquals(LocalDate.of(2026, 11, 16), twoDaysAgoRes?.resolvedDate)
+
+        val threeDaysAgoRes = EgyptianArabicDateResolver.resolveDate("من 3 أيام", refDate)
+        assertEquals(LocalDate.of(2026, 11, 15), threeDaysAgoRes?.resolvedDate)
+
+        val fiveDaysAgoArabicIndic = EgyptianArabicDateResolver.resolveDate("من ٥ أيام", refDate)
+        assertEquals(LocalDate.of(2026, 11, 13), fiveDaysAgoArabicIndic?.resolvedDate)
+
+        val threeDaysAgoWords = EgyptianArabicDateResolver.resolveDate("منذ ثلاثة أيام", refDate)
+        assertEquals(LocalDate.of(2026, 11, 15), threeDaysAgoWords?.resolvedDate)
+
+        // 2. Relative Weeks
+        val oneWeekAgoRes = EgyptianArabicDateResolver.resolveDate("من أسبوع", refDate)
+        assertEquals(LocalDate.of(2026, 11, 11), oneWeekAgoRes?.resolvedDate)
+
+        val twoWeeksAgoRes = EgyptianArabicDateResolver.resolveDate("من أسبوعين", refDate)
+        assertEquals(LocalDate.of(2026, 11, 4), twoWeeksAgoRes?.resolvedDate)
+
+        val threeWeeksAgoRes = EgyptianArabicDateResolver.resolveDate("من 3 أسابيع", refDate)
+        assertEquals(LocalDate.of(2026, 10, 28), threeWeeksAgoRes?.resolvedDate)
+
+        // Whole-week ambiguous period without specific day must NOT assign an arbitrary date
+        val wholeWeekRes = EgyptianArabicDateResolver.resolveDate("الأسبوع اللي فات", refDate)
+        assertNotNull(wholeWeekRes)
+        assertTrue(wholeWeekRes!!.isAmbiguous)
+        assertNull(wholeWeekRes.resolvedDate)
+
+        // 3. Days of the Week
+        // Reference date is Wednesday (2026-11-18).
+        // "الخميس اللي فات" must resolve to the previous Thursday (2026-11-12, 6 days ago), NOT tomorrow!
+        val lastThursdayRes = EgyptianArabicDateResolver.resolveDate("الخميس اللي فات", refDate)
+        assertEquals(LocalDate.of(2026, 11, 12), lastThursdayRes?.resolvedDate)
+
+        // "يوم الاتنين الجاي" must resolve to upcoming Monday (2026-11-23, 5 days ahead)
+        val nextMondayRes = EgyptianArabicDateResolver.resolveDate("يوم الاتنين الجاي", refDate)
+        assertEquals(LocalDate.of(2026, 11, 23), nextMondayRes?.resolvedDate)
+
+        // Unqualified "السبت" resolves to most recent past Saturday (2026-11-14)
+        val pastSaturdayRes = EgyptianArabicDateResolver.resolveDate("السبت", refDate)
+        assertEquals(LocalDate.of(2026, 11, 14), pastSaturdayRes?.resolvedDate)
+
+        // 4. Relative Months
+        val oneMonthAgoRes = EgyptianArabicDateResolver.resolveDate("من شهر", refDate)
+        assertEquals(LocalDate.of(2026, 10, 18), oneMonthAgoRes?.resolvedDate)
+
+        val twoMonthsAgoRes = EgyptianArabicDateResolver.resolveDate("من شهرين", refDate)
+        assertEquals(LocalDate.of(2026, 9, 18), twoMonthsAgoRes?.resolvedDate)
+
+        // Specific day in previous month: "يوم 15 الشهر اللي فات" -> 2026-10-15
+        val day15PrevMonth = EgyptianArabicDateResolver.resolveDate("يوم 15 الشهر اللي فات", refDate)
+        assertEquals(LocalDate.of(2026, 10, 15), day15PrevMonth?.resolvedDate)
+
+        // Specific day in current month: "يوم 5 الشهر ده" -> 2026-11-05
+        val day5CurrentMonth = EgyptianArabicDateResolver.resolveDate("يوم 5 الشهر ده", refDate)
+        assertEquals(LocalDate.of(2026, 11, 5), day5CurrentMonth?.resolvedDate)
+
+        // Month boundary anchored
+        val firstDayOfCurrentMonth = EgyptianArabicDateResolver.resolveDate("أول الشهر", refDate)
+        assertEquals(LocalDate.of(2026, 11, 1), firstDayOfCurrentMonth?.resolvedDate)
+
+        val lastDayOfPrevMonth = EgyptianArabicDateResolver.resolveDate("آخر الشهر اللي فات", refDate)
+        assertEquals(LocalDate.of(2026, 10, 31), lastDayOfPrevMonth?.resolvedDate)
+
+        // Invalid day in target month: "يوم 31 الشهر اللي فات" when previous month has 30 days (e.g. from July to June)
+        val julyRefDate = LocalDate.of(2026, 7, 10) // previous month June has 30 days
+        val invalidDayRes = EgyptianArabicDateResolver.resolveDate("يوم 31 الشهر اللي فات", julyRefDate)
+        assertNotNull(invalidDayRes)
+        assertTrue(invalidDayRes!!.isInvalid)
+        assertTrue(invalidDayRes.isAmbiguous)
+        assertNull(invalidDayRes.resolvedDate)
+
+        // 5. Relative Years
+        val oneYearAgoRes = EgyptianArabicDateResolver.resolveDate("من سنة", refDate)
+        assertEquals(LocalDate.of(2025, 11, 18), oneYearAgoRes?.resolvedDate)
+
+        val twoYearsAgoRes = EgyptianArabicDateResolver.resolveDate("من سنتين", refDate)
+        assertEquals(LocalDate.of(2024, 11, 18), twoYearsAgoRes?.resolvedDate)
+    }
+
+    @Test
+    fun `local parser parses natural Egyptian Arabic sentences with dates, removes date span, and preserves amount and description`() {
+        val todayIso = "2026-11-18"
+
+        // Input 1: "دفعت 50 جنيه مواصلات من 3 أيام" -> amount 50, category Transport, date = 2026-11-15
+        val res1 = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "دفعت 50 جنيه مواصلات من 3 أيام",
+            todayIsoDate = todayIso,
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(1, res1.proposals.size)
+        val draft1 = res1.proposals[0]
+        assertEquals("مواصلات", draft1.description)
+        assertEquals(5000L, draft1.amountMinorUnits)
+        assertEquals("2026-11-15", draft1.isoDate)
+        assertTrue(draft1.aiDetectedDate)
+        assertEquals(DefaultCategories.CAT_TRANSPORT, draft1.categoryId)
+
+        // Input 2: "اشتريت قهوة بـ 25 جنيه من يومين ودفعت تاكسي 30 جنيه امبارح"
+        val res2 = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "اشتريت قهوة بـ 25 جنيه من يومين ودفعت تاكسي 30 جنيه امبارح",
+            todayIsoDate = todayIso,
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(2, res2.proposals.size)
+        assertEquals("قهوة", res2.proposals[0].description)
+        assertEquals(2500L, res2.proposals[0].amountMinorUnits)
+        assertEquals("2026-11-16", res2.proposals[0].isoDate)
+        assertTrue(res2.proposals[0].aiDetectedDate)
+
+        assertEquals("تاكسي", res2.proposals[1].description)
+        assertEquals(3000L, res2.proposals[1].amountMinorUnits)
+        assertEquals("2026-11-17", res2.proposals[1].isoDate)
+        assertTrue(res2.proposals[1].aiDetectedDate)
+
+        // Input 3: "دفعت 200 جنيه إيجار يوم 5 الشهر ده"
+        val res3 = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "دفعت 200 جنيه إيجار يوم 5 الشهر ده",
+            todayIsoDate = todayIso,
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(1, res3.proposals.size)
+        assertEquals("إيجار", res3.proposals[0].description)
+        assertEquals(20_000L, res3.proposals[0].amountMinorUnits)
+        assertEquals("2026-11-05", res3.proposals[0].isoDate)
+        assertTrue(res3.proposals[0].aiDetectedDate)
+
+        // Input 4: Ambiguous whole-week expression flags dateNeedsConfirmation and isAmbiguous without inventing a day
+        val res4 = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "دفعت صيانة 150 جنيه الأسبوع اللي فات",
+            todayIsoDate = todayIso,
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(1, res4.proposals.size)
+        val draft4 = res4.proposals[0]
+        assertEquals("صيانة", draft4.description)
+        assertEquals(15_000L, draft4.amountMinorUnits)
+        assertTrue(draft4.isAmbiguous)
+        assertTrue(draft4.dateNeedsConfirmation)
+        assertFalse(draft4.aiDetectedDate)
+        assertEquals(todayIso, draft4.isoDate)
     }
 }

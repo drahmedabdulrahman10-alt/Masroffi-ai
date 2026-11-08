@@ -22,7 +22,17 @@ data class ProposedTransactionDraft(
     val suggestedCategoryId: String? = categoryId,
     val userConfirmedCategory: Boolean = false,
     val aiDetectedDate: Boolean = false,
-    val userModifiedDate: Boolean = false
+    val userModifiedDate: Boolean = false,
+    /**
+     * True when the transaction text mentioned a date expression that could not be resolved to a
+     * single calendar day (period-only expressions like "الأسبوع اللي فات" / "الشهر اللي فات",
+     * vague expressions like "بعد كام يوم", or invalid dates like "يوم 31 الشهر اللي فات" in a
+     * 30-day month). The draft keeps a placeholder [isoDate] and requires the user to confirm the
+     * date individually before saving; it is never auto-saved.
+     */
+    val dateNeedsConfirmation: Boolean = false,
+    /** Arabic explanation shown to the user when [dateNeedsConfirmation] is true. */
+    val dateAmbiguityReason: String? = null
 ) {
     val isValidToSave: Boolean
         get() = description.isNotBlank() &&

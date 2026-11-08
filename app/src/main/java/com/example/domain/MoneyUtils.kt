@@ -346,6 +346,36 @@ object MoneyUtils {
         return cells
     }
 
+    /**
+     * Returns the Saturday (السبت) starting the Arabic week that contains [date],
+     * matching Masroofi AI's Saturday-first calendar convention.
+     */
+    fun startOfArabicWeek(date: LocalDate): LocalDate {
+        val daysSinceSaturday = (date.dayOfWeek.value + 1) % 7
+        return date.minusDays(daysSinceSaturday.toLong())
+    }
+
+    /**
+     * Returns the Friday (الجمعة) ending the Arabic week that contains [date],
+     * matching Masroofi AI's Saturday-through-Friday week convention.
+     */
+    fun endOfArabicWeek(date: LocalDate): LocalDate {
+        return startOfArabicWeek(date).plusDays(6)
+    }
+
+    /**
+     * Computes the inclusive (Saturday..Friday) week range relative to [referenceDate]
+     * shifted by [weeksOffset] weeks (-1 = previous week, 0 = current week, +1 = next week).
+     */
+    fun arabicWeekRange(
+        referenceDate: LocalDate,
+        weeksOffset: Long = 0L
+    ): Pair<LocalDate, LocalDate> {
+        val shiftedRef = referenceDate.plusWeeks(weeksOffset)
+        val start = startOfArabicWeek(shiftedRef)
+        return start to start.plusDays(6)
+    }
+
     fun currentYearMonth(
         nowMillis: Long = System.currentTimeMillis(),
         zoneId: ZoneId = ZoneId.systemDefault()

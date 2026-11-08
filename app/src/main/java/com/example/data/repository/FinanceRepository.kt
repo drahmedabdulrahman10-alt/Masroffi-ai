@@ -428,7 +428,7 @@ class FinanceRepository(
             return rawJsonResult.fold(
                 onSuccess = { rawJson ->
                     withContext(defaultDispatcher) {
-                        EgyptianArabicLocalParser.validateAndMapAiJsonResponse(
+                        val validated = EgyptianArabicLocalParser.validateAndMapAiJsonResponse(
                             rawJsonResponse = rawJson,
                             todayIsoDate = todayIsoDate,
                             defaultCurrency = prefs.currencyCode,
@@ -437,6 +437,23 @@ class FinanceRepository(
                             providerLabel = providerLabel,
                             refundAccountingMode = prefs.refundAccountingMode
                         )
+                        // Deterministic local date resolution always takes precedence over dates
+                        // calculated by the remote model (no extra network request is made).
+                        validated.map { remoteResult ->
+                            val localDates = EgyptianArabicLocalParser.parseNaturalText(
+                                rawText = userText,
+                                todayIsoDate = todayIsoDate,
+                                defaultCurrency = prefs.currencyCode,
+                                eligibleCategories = activeCategories,
+                                learnedRules = learnedRules,
+                                refundAccountingMode = prefs.refundAccountingMode
+                            )
+                            EgyptianArabicLocalParser.reconcileRemoteDatesWithLocal(
+                                remoteResult = remoteResult,
+                                localResult = localDates,
+                                todayIsoDate = todayIsoDate
+                            )
+                        }
                     }
                 },
                 onFailure = { err ->
