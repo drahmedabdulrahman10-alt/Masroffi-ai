@@ -19,6 +19,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Search
@@ -50,6 +51,7 @@ import com.example.data.local.TransactionEntity
 import com.example.data.local.TransactionType
 import com.example.data.preferences.SupportedCurrencies
 import com.example.domain.MoneyUtils
+import com.example.ui.components.MasroofiCalendarDatePickerDialog
 import com.example.ui.components.TransactionItemCard
 import com.example.ui.viewmodel.TransactionHistoryFilter
 import com.example.ui.viewmodel.TransactionsUiState
@@ -72,6 +74,8 @@ fun TransactionsScreen(
         uiState.categories.associateBy { it.id }
     }
     var showAdvancedFilters by rememberSaveable { mutableStateOf(false) }
+    var pickingStartFilterDate by rememberSaveable { mutableStateOf(false) }
+    var pickingEndFilterDate by rememberSaveable { mutableStateOf(false) }
 
     val groupedByDate = remember(uiState.filteredHistoryTransactions) {
         uiState.filteredHistoryTransactions.groupBy {
@@ -253,6 +257,14 @@ fun TransactionsScreen(
                                     value = filter.startIsoDate,
                                     onValueChange = { onUpdateFilter(filter.copy(startIsoDate = it)) },
                                     label = { Text("من تاريخ (YYYY-MM-DD)") },
+                                    trailingIcon = {
+                                        IconButton(onClick = { pickingStartFilterDate = true }) {
+                                            Icon(
+                                                imageVector = Icons.Default.CalendarMonth,
+                                                contentDescription = "اختيار تاريخ البداية"
+                                            )
+                                        }
+                                    },
                                     singleLine = true,
                                     modifier = Modifier.weight(1f)
                                 )
@@ -260,6 +272,14 @@ fun TransactionsScreen(
                                     value = filter.endIsoDate,
                                     onValueChange = { onUpdateFilter(filter.copy(endIsoDate = it)) },
                                     label = { Text("إلى تاريخ (YYYY-MM-DD)") },
+                                    trailingIcon = {
+                                        IconButton(onClick = { pickingEndFilterDate = true }) {
+                                            Icon(
+                                                imageVector = Icons.Default.CalendarMonth,
+                                                contentDescription = "اختيار تاريخ النهاية"
+                                            )
+                                        }
+                                    },
                                     singleLine = true,
                                     modifier = Modifier.weight(1f)
                                 )
@@ -362,5 +382,27 @@ fun TransactionsScreen(
                 }
             }
         }
+    }
+
+    if (pickingStartFilterDate) {
+        MasroofiCalendarDatePickerDialog(
+            initialIsoDate = filter.startIsoDate.ifBlank { MoneyUtils.todayIsoDate() },
+            onConfirmDate = { selectedIso ->
+                onUpdateFilter(filter.copy(startIsoDate = selectedIso))
+                pickingStartFilterDate = false
+            },
+            onDismiss = { pickingStartFilterDate = false }
+        )
+    }
+
+    if (pickingEndFilterDate) {
+        MasroofiCalendarDatePickerDialog(
+            initialIsoDate = filter.endIsoDate.ifBlank { MoneyUtils.todayIsoDate() },
+            onConfirmDate = { selectedIso ->
+                onUpdateFilter(filter.copy(endIsoDate = selectedIso))
+                pickingEndFilterDate = false
+            },
+            onDismiss = { pickingEndFilterDate = false }
+        )
     }
 }

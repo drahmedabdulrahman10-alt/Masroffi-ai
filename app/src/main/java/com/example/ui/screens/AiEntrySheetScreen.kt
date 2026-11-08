@@ -75,6 +75,7 @@ import com.example.data.local.TransactionType
 import com.example.data.preferences.SupportedCurrencies
 import com.example.domain.MoneyUtils
 import com.example.domain.ai.ProposedTransactionDraft
+import com.example.ui.components.TransactionDateSelectorSection
 import com.example.ui.speech.MasroofiSpeechHelper
 import com.example.ui.speech.SpeechRecognitionState
 import com.example.ui.theme.ExpenseRedLight
@@ -93,7 +94,8 @@ fun AiEntrySheetScreen(
     onUpdateDraft: (ProposedTransactionDraft) -> Unit,
     onRemoveDraft: (String) -> Unit,
     onCancelReview: () -> Unit,
-    onSaveAllReviewed: () -> Unit
+    onSaveAllReviewed: () -> Unit,
+    onSelectBatchDate: (String) -> Unit = {}
 ) {
     BackHandler { onClose() }
 
@@ -350,6 +352,13 @@ fun AiEntrySheetScreen(
                                 )
                             }
                         }
+
+                        TransactionDateSelectorSection(
+                            selectedIsoDate = uiState.selectedTransactionIsoDate,
+                            onDateSelected = onSelectBatchDate,
+                            tagPrefix = "ai_batch",
+                            showTextField = false
+                        )
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -705,12 +714,18 @@ private fun ProposedDraftEditorCard(
                 )
             }
 
-            OutlinedTextField(
-                value = draft.isoDate,
-                onValueChange = { onUpdateDraft(draft.copy(isoDate = it)) },
-                label = { Text("التاريخ (YYYY-MM-DD)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
+            TransactionDateSelectorSection(
+                selectedIsoDate = draft.isoDate,
+                onDateSelected = { updatedIsoDate ->
+                    onUpdateDraft(
+                        draft.copy(
+                            isoDate = updatedIsoDate,
+                            userModifiedDate = true
+                        )
+                    )
+                },
+                tagPrefix = "ai_draft_${draft.draftId}",
+                showTextField = true
             )
 
             if (draft.type == TransactionType.INCOME) {

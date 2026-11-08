@@ -18,12 +18,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -48,6 +50,7 @@ import com.example.domain.BudgetStatus
 import com.example.domain.MoneyUtils
 import com.example.ui.components.CategoryDonutAndBarsChart
 import com.example.ui.components.DailySpendingTrendChart
+import com.example.ui.components.MasroofiCalendarDatePickerDialog
 import com.example.ui.components.TransactionItemCard
 import com.example.ui.theme.DangerRedLight
 import com.example.ui.theme.ExpenseRedLight
@@ -79,6 +82,8 @@ fun ReportsScreen(
     var customEnd by rememberSaveable(uiState.customReportEndIso) {
         mutableStateOf(uiState.customReportEndIso)
     }
+    var pickingCustomStartDate by rememberSaveable { mutableStateOf(false) }
+    var pickingCustomEndDate by rememberSaveable { mutableStateOf(false) }
 
     val drilldownTransactions = remember(
         uiState.reportPeriodTransactions,
@@ -146,6 +151,14 @@ fun ReportsScreen(
                                     value = customStart,
                                     onValueChange = { customStart = it },
                                     label = { Text("من (YYYY-MM-DD)") },
+                                    trailingIcon = {
+                                        IconButton(onClick = { pickingCustomStartDate = true }) {
+                                            Icon(
+                                                imageVector = Icons.Default.CalendarMonth,
+                                                contentDescription = "اختيار تاريخ البداية"
+                                            )
+                                        }
+                                    },
                                     singleLine = true,
                                     modifier = Modifier.weight(1f)
                                 )
@@ -153,6 +166,14 @@ fun ReportsScreen(
                                     value = customEnd,
                                     onValueChange = { customEnd = it },
                                     label = { Text("إلى (YYYY-MM-DD)") },
+                                    trailingIcon = {
+                                        IconButton(onClick = { pickingCustomEndDate = true }) {
+                                            Icon(
+                                                imageVector = Icons.Default.CalendarMonth,
+                                                contentDescription = "اختيار تاريخ النهاية"
+                                            )
+                                        }
+                                    },
                                     singleLine = true,
                                     modifier = Modifier.weight(1f)
                                 )
@@ -523,6 +544,28 @@ fun ReportsScreen(
                 }
             }
         }
+    }
+
+    if (pickingCustomStartDate) {
+        MasroofiCalendarDatePickerDialog(
+            initialIsoDate = customStart.ifBlank { MoneyUtils.todayIsoDate() },
+            onConfirmDate = { selectedIso ->
+                customStart = selectedIso
+                pickingCustomStartDate = false
+            },
+            onDismiss = { pickingCustomStartDate = false }
+        )
+    }
+
+    if (pickingCustomEndDate) {
+        MasroofiCalendarDatePickerDialog(
+            initialIsoDate = customEnd.ifBlank { MoneyUtils.todayIsoDate() },
+            onConfirmDate = { selectedIso ->
+                customEnd = selectedIso
+                pickingCustomEndDate = false
+            },
+            onDismiss = { pickingCustomEndDate = false }
+        )
     }
 }
 

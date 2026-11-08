@@ -149,7 +149,7 @@ fun HomeScreen(
                         )
                         IconButton(
                             onClick = {
-                                val nextYm = nextYearMonth(uiState.selectedHomeYearMonth)
+                                val nextYm = MoneyUtils.nextYearMonth(uiState.selectedHomeYearMonth)
                                 onChangeMonth(nextYm)
                             },
                             modifier = Modifier.size(36.dp)
@@ -688,17 +688,5 @@ fun HomeScreen(
                 }
             }
         )
-    }
-}
-
-private fun nextYearMonth(yearMonth: String): String {
-    val parts = yearMonth.split("-")
-    if (parts.size != 2) return yearMonth
-    val year = parts[0].toIntOrNull() ?: return yearMonth
-    val month = parts[1].toIntOrNull() ?: return yearMonth
-    return if (month == 12) {
-        String.format(java.util.Locale.US, "%04d-01", year + 1)
-    } else {
-        String.format(java.util.Locale.US, "%04d-%02d", year, month + 1)
     }
 }

@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -24,13 +25,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.AccountBalanceWallet
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Category
 import androidx.compose.material.icons.filled.Checkroom
+import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FitnessCenter
+import androidx.compose.material.icons.filled.KeyboardDoubleArrowLeft
+import androidx.compose.material.icons.filled.KeyboardDoubleArrowRight
 import androidx.compose.material.icons.filled.MedicalServices
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Payments
@@ -44,6 +50,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,6 +78,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.local.CategoryEntity
@@ -81,8 +89,11 @@ import com.example.data.preferences.SupportedCurrencies
 import com.example.domain.CategoryBreakdownItem
 import com.example.domain.DailySpendingPoint
 import com.example.domain.MoneyUtils
+import com.example.domain.QuickDateOption
 import com.example.ui.theme.ExpenseRedLight
 import com.example.ui.theme.IncomeGreenLight
+import java.time.YearMonth
+import java.time.ZoneId
 
 object CategoryIconHelper {
     val availableIcons = listOf(
@@ -595,17 +606,13 @@ fun ManualTransactionDialog(
                         .testTag("manual_amount_input")
                 )
 
-                OutlinedTextField(
-                    value = isoDate,
-                    onValueChange = {
-                        isoDate = it
+                TransactionDateSelectorSection(
+                    selectedIsoDate = isoDate,
+                    onDateSelected = { updatedDate ->
+                        isoDate = updatedDate
                         errorMessage = null
                     },
-                    label = { Text("التاريخ (YYYY-MM-DD)") },
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("manual_date_input")
+                    tagPrefix = "manual"
                 )
 
                 if (selectedType == TransactionType.INCOME) {
@@ -685,13 +692,14 @@ fun ManualTransactionDialog(
                         minor == null || minor <= 0L -> errorMessage = "يرجى إدخال مبلغ صحيح أكبر من الصفر"
                         dateEpoch == null -> errorMessage = "يرجى إدخال تاريخ صحيح بالصيغة YYYY-MM-DD"
                         else -> {
+                            val normalizedIso = MoneyUtils.epochMillisToIsoDate(dateEpoch)
                             onSave(
                                 existingTransaction?.id,
                                 cleanDesc,
                                 amountText,
                                 selectedType,
                                 selectedCategoryId,
-                                isoDate,
+                                normalizedIso,
                                 notes,
                                 isRefundOffset
                             )
@@ -707,6 +715,470 @@ fun ManualTransactionDialog(
             TextButton(
                 onClick = onDismiss,
                 modifier = Modifier.testTag("manual_cancel_button")
+            ) {
+                Text("إلغاء")
+            }
+        }
+    )
+}
+
+/**
+ * Reusable Arabic-first date selection control combining:
+ * 1. Clear display of the currently selected date + button to open the Calendar Date Picker dialog.
+ * 2. Dynamic quick-selection chips (اليوم / Today, أمس / Yesterday, أول أمس / Day Before Yesterday)
+ *    with active-selection highlighting.
+ * 3. Optional ISO date text field (YYYY-MM-DD) with a trailing calendar trigger icon.
+ */
+@Composable
+fun TransactionDateSelectorSection(
+    selectedIsoDate: String,
+    onDateSelected: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    tagPrefix: String = "manual",
+    nowMillis: Long = System.currentTimeMillis(),
+    zoneId: ZoneId = ZoneId.systemDefault(),
+    showTextField: Boolean = true
+) {
+    var showCalendarDialog by rememberSaveable(tagPrefix) { mutableStateOf(false) }
+    val matchedQuickOption = remember(selectedIsoDate, nowMillis, zoneId) {
+        MoneyUtils.matchQuickDateOption(selectedIsoDate, nowMillis, zoneId)
+    }
+    val formattedBannerText = remember(selectedIsoDate, nowMillis, zoneId) {
+        MoneyUtils.formatSelectedDateBannerText(selectedIsoDate, nowMillis, zoneId)
+    }
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("${tagPrefix}_selected_date_banner")
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CalendarMonth,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Column {
+                        Text(
+                            text = "التاريخ المحدد:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = formattedBannerText,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.testTag("${tagPrefix}_selected_date_text")
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                FilledTonalButton(
+                    onClick = { showCalendarDialog = true },
+                    modifier = Modifier.testTag("${tagPrefix}_open_calendar_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CalendarMonth,
+                        contentDescription = "اختيار التاريخ من التقويم",
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "التقويم",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+        }
+
+        // Quick Date Selection Chips: اليوم (Today), أمس (Yesterday), أول أمس (Day Before Yesterday)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            QuickDateOption.entries.forEach { option ->
+                val isSelected = matchedQuickOption == option
+                FilterChip(
+                    selected = isSelected,
+                    onClick = {
+                        val resolvedIso = MoneyUtils.resolveQuickDateIso(option, nowMillis, zoneId)
+                        onDateSelected(resolvedIso)
+                    },
+                    label = {
+                        Text(
+                            text = option.arabicLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1
+                        )
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("${tagPrefix}_quick_date_${option.name}")
+                )
+            }
+        }
+
+        if (showTextField) {
+            OutlinedTextField(
+                value = selectedIsoDate,
+                onValueChange = { onDateSelected(it) },
+                label = { Text("التاريخ (YYYY-MM-DD)") },
+                trailingIcon = {
+                    IconButton(
+                        onClick = { showCalendarDialog = true },
+                        modifier = Modifier.testTag("${tagPrefix}_date_field_calendar_icon")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CalendarMonth,
+                            contentDescription = "فتح التقويم"
+                        )
+                    }
+                },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("${tagPrefix}_date_input")
+            )
+        }
+    }
+
+    if (showCalendarDialog) {
+        MasroofiCalendarDatePickerDialog(
+            initialIsoDate = selectedIsoDate,
+            nowMillis = nowMillis,
+            zoneId = zoneId,
+            onConfirmDate = { confirmedIso ->
+                onDateSelected(confirmedIso)
+                showCalendarDialog = false
+            },
+            onDismiss = {
+                showCalendarDialog = false
+            }
+        )
+    }
+}
+
+/**
+ * Arabic-first RTL Calendar Date Picker Dialog built on java.time (LocalDate & YearMonth).
+ * - Avoids any UTC-to-local date shift by operating strictly on LocalDate in the local ZoneId.
+ * - Supports month and year navigation (previous/next month, previous/next year).
+ * - Highlights Today distinctly from the selected date.
+ * - Preserves the previously committed date when canceled or dismissed without confirmation.
+ */
+@Composable
+fun MasroofiCalendarDatePickerDialog(
+    initialIsoDate: String,
+    nowMillis: Long = System.currentTimeMillis(),
+    zoneId: ZoneId = ZoneId.systemDefault(),
+    onConfirmDate: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val todayDate = remember(nowMillis, zoneId) {
+        MoneyUtils.epochMillisToLocalDate(nowMillis, zoneId)
+    }
+    val initialDate = remember(initialIsoDate, todayDate) {
+        MoneyUtils.parseIsoLocalDate(initialIsoDate) ?: todayDate
+    }
+
+    var pendingSelectedIso by remember(initialIsoDate) {
+        mutableStateOf(MoneyUtils.formatLocalDateToIso(initialDate))
+    }
+    val pendingLocalDate = remember(pendingSelectedIso, initialDate) {
+        MoneyUtils.parseIsoLocalDate(pendingSelectedIso) ?: initialDate
+    }
+
+    var displayedYearMonthStr by remember(initialIsoDate) {
+        mutableStateOf(YearMonth.from(initialDate).toString())
+    }
+    val displayedYearMonth = remember(displayedYearMonthStr, initialDate) {
+        try {
+            YearMonth.parse(displayedYearMonthStr)
+        } catch (_: Exception) {
+            YearMonth.from(initialDate)
+        }
+    }
+
+    val calendarCells = remember(displayedYearMonth) {
+        MoneyUtils.buildCalendarMonthCells(displayedYearMonth)
+    }
+    val matchedPendingQuickOption = remember(pendingSelectedIso, nowMillis, zoneId) {
+        MoneyUtils.matchQuickDateOption(pendingSelectedIso, nowMillis, zoneId)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.testTag("calendar_date_picker_dialog"),
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "اختيار التاريخ",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "التاريخ المختار: ${MoneyUtils.formatSelectedDateBannerText(pendingSelectedIso, nowMillis, zoneId)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.testTag("calendar_selected_date_banner")
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Quick Date Shortcuts inside the Calendar Dialog
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    QuickDateOption.entries.forEach { option ->
+                        val resolvedDate = MoneyUtils.resolveQuickDate(option, todayDate)
+                        val resolvedIso = MoneyUtils.formatLocalDateToIso(resolvedDate)
+                        FilterChip(
+                            selected = matchedPendingQuickOption == option,
+                            onClick = {
+                                pendingSelectedIso = resolvedIso
+                                displayedYearMonthStr = YearMonth.from(resolvedDate).toString()
+                            },
+                            label = {
+                                Text(
+                                    text = option.arabicLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1
+                                )
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("calendar_quick_date_${option.name}")
+                        )
+                    }
+                }
+
+                // Month & Year Navigation Header
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = {
+                                    displayedYearMonthStr = displayedYearMonth.minusYears(1).toString()
+                                },
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("calendar_prev_year_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.KeyboardDoubleArrowRight,
+                                    contentDescription = "السنة السابقة"
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    displayedYearMonthStr = displayedYearMonth.minusMonths(1).toString()
+                                },
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("calendar_prev_month_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ChevronRight,
+                                    contentDescription = "الشهر السابق"
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = MoneyUtils.arabicMonthYearTitle(displayedYearMonth),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("calendar_month_year_title")
+                        )
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = {
+                                    displayedYearMonthStr = displayedYearMonth.plusMonths(1).toString()
+                                },
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("calendar_next_month_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ChevronLeft,
+                                    contentDescription = "الشهر التالي"
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    displayedYearMonthStr = displayedYearMonth.plusYears(1).toString()
+                                },
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .testTag("calendar_next_year_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.KeyboardDoubleArrowLeft,
+                                    contentDescription = "السنة التالية"
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Arabic Week Days Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    MoneyUtils.arabicWeekDaysShort.forEach { dayName ->
+                        Text(
+                            text = dayName,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                // Calendar Days Grid (7 columns per week row)
+                val weekRows = remember(calendarCells) { calendarCells.chunked(7) }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    weekRows.forEach { week ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            week.forEach { cellDate ->
+                                if (cellDate == null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(32.dp)
+                                    )
+                                } else {
+                                    val cellIso = MoneyUtils.formatLocalDateToIso(cellDate)
+                                    val isSelected = cellDate == pendingLocalDate
+                                    val isToday = cellDate == todayDate
+
+                                    val bgColor = when {
+                                        isSelected -> MaterialTheme.colorScheme.primary
+                                        isToday -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                                        else -> Color.Transparent
+                                    }
+                                    val textColor = when {
+                                        isSelected -> MaterialTheme.colorScheme.onPrimary
+                                        isToday -> MaterialTheme.colorScheme.primary
+                                        else -> MaterialTheme.colorScheme.onSurface
+                                    }
+                                    val borderModifier = if (isToday && !isSelected) {
+                                        Modifier.border(
+                                            width = 1.5.dp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            shape = CircleShape
+                                        )
+                                    } else {
+                                        Modifier
+                                    }
+
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(32.dp)
+                                            .padding(1.dp)
+                                            .clip(CircleShape)
+                                            .background(bgColor)
+                                            .then(borderModifier)
+                                            .clickable {
+                                                pendingSelectedIso = cellIso
+                                            }
+                                            .testTag("calendar_day_$cellIso")
+                                    ) {
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.Center
+                                        ) {
+                                            Text(
+                                                text = cellDate.dayOfMonth.toString(),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontWeight = if (isSelected || isToday) FontWeight.Bold else FontWeight.Normal,
+                                                color = textColor,
+                                                textAlign = TextAlign.Center
+                                            )
+                                            if (isToday) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(4.dp)
+                                                        .clip(CircleShape)
+                                                        .background(
+                                                            if (isSelected) MaterialTheme.colorScheme.onPrimary
+                                                            else MaterialTheme.colorScheme.primary
+                                                        )
+                                                        .testTag("calendar_today_indicator_$cellIso")
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirmDate(pendingSelectedIso) },
+                modifier = Modifier.testTag("calendar_confirm_button")
+            ) {
+                Text("تأكيد")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag("calendar_cancel_button")
             ) {
                 Text("إلغاء")
             }

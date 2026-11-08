@@ -4,11 +4,15 @@ import android.content.Context
 import android.net.Uri
 import android.os.Looper
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
@@ -34,10 +38,13 @@ import com.example.data.preferences.SecureKeyStorage
 import com.example.data.repository.FinanceRepository
 import com.example.data.repository.RestoreMode
 import com.example.di.AppContainer
+import com.example.domain.MoneyUtils
+import com.example.domain.QuickDateOption
 import com.example.domain.ai.AiProviderClient
 import com.example.domain.ai.AiServiceException
 import com.example.domain.ai.ProposedTransactionDraft
 import com.example.ui.MasroofiApp
+import com.example.ui.components.ManualTransactionDialog
 import com.example.ui.speech.MasroofiSpeechHelper
 import com.example.ui.speech.SpeechRecognitionState
 import com.example.ui.viewmodel.AiEntryViewModel
@@ -949,5 +956,239 @@ class ExampleRobolectricTest {
         }
         assertEquals(1, aiEntryVm.uiState.value.aiParseResult?.proposals?.size)
         assertEquals(3000L, aiEntryVm.uiState.value.aiParseResult?.proposals?.first()?.amountMinorUnits)
+    }
+
+    // --- Task 6: Calendar Date Picker & Quick Date Selection Integration Tests ---
+
+    @Test
+    fun `manual transaction dialog supports quick date chips, calendar date picker navigation, cancel preservation, and confirm save`() {
+        val container = createTestAppContainer(
+            defaultDispatcher = Dispatchers.Main,
+            ioDispatcher = Dispatchers.Main
+        )
+        val homeVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[HomeViewModel::class.java]
+        val transactionsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[TransactionsViewModel::class.java]
+        val aiEntryVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[AiEntryViewModel::class.java]
+        val reportsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[ReportsViewModel::class.java]
+        val settingsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[SettingsViewModel::class.java]
+
+        composeTestRule.setContent {
+            MasroofiApp(
+                homeViewModel = homeVm,
+                transactionsViewModel = transactionsVm,
+                aiEntryViewModel = aiEntryVm,
+                reportsViewModel = reportsVm,
+                settingsViewModel = settingsVm
+            )
+        }
+        awaitMainLooperCondition {
+            transactionsVm.uiState.value.categories.isNotEmpty()
+        }
+
+        val todayIso = MoneyUtils.todayIsoDate()
+        val yesterdayIso = MoneyUtils.resolveQuickDateIso(QuickDateOption.YESTERDAY)
+        val dayBeforeYesterdayIso = MoneyUtils.resolveQuickDateIso(QuickDateOption.DAY_BEFORE_YESTERDAY)
+
+        // Open manual expense dialog from Home screen
+        composeTestRule.onNodeWithTag("home_screen_list")
+            .performScrollToNode(hasTestTag("quick_action_add_expense"))
+        composeTestRule.onNodeWithTag("quick_action_add_expense").performClick()
+        composeTestRule.waitForIdle()
+
+        // 1. Default date is Today and TODAY quick chip is selected
+        composeTestRule.onNodeWithTag("manual_quick_date_TODAY").assertIsSelected()
+        composeTestRule.onNodeWithTag("manual_quick_date_YESTERDAY").assertIsNotSelected()
+        composeTestRule.onNodeWithTag("manual_quick_date_DAY_BEFORE_YESTERDAY").assertIsNotSelected()
+        composeTestRule.onNodeWithTag("manual_date_input").assertTextContains(todayIso)
+
+        // 2. Tap Yesterday quick chip -> updates date immediately and highlights YESTERDAY chip
+        composeTestRule.onNodeWithTag("manual_quick_date_YESTERDAY").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("manual_quick_date_YESTERDAY").assertIsSelected()
+        composeTestRule.onNodeWithTag("manual_quick_date_TODAY").assertIsNotSelected()
+        composeTestRule.onNodeWithTag("manual_date_input").assertTextContains(yesterdayIso)
+
+        // 3. Tap Day Before Yesterday quick chip -> updates date immediately and highlights DAY_BEFORE_YESTERDAY chip
+        composeTestRule.onNodeWithTag("manual_quick_date_DAY_BEFORE_YESTERDAY").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("manual_quick_date_DAY_BEFORE_YESTERDAY").assertIsSelected()
+        composeTestRule.onNodeWithTag("manual_date_input").assertTextContains(dayBeforeYesterdayIso)
+
+        // 4. Open Calendar Date Picker, navigate to previous month, then CANCEL -> must preserve dayBeforeYesterdayIso
+        composeTestRule.onNodeWithTag("manual_open_calendar_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("calendar_date_picker_dialog").assertIsDisplayed()
+
+        composeTestRule.onNodeWithTag("calendar_prev_month_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("calendar_cancel_button").performClick()
+        composeTestRule.waitForIdle()
+
+        // Committed date must still be dayBeforeYesterdayIso after canceling
+        composeTestRule.onNodeWithTag("manual_date_input").assertTextContains(dayBeforeYesterdayIso)
+
+        // 5. Re-open Calendar Date Picker, select Yesterday via calendar day cell, and CONFIRM
+        composeTestRule.onNodeWithTag("manual_open_calendar_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("calendar_day_$yesterdayIso").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("calendar_confirm_button").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("manual_date_input").assertTextContains(yesterdayIso)
+        composeTestRule.onNodeWithTag("manual_quick_date_YESTERDAY").assertIsSelected()
+
+        // 6. Fill description & amount and save transaction with the selected date
+        composeTestRule.onNodeWithTag("manual_description_input").performScrollTo().performTextInput("عشاء أمس")
+        composeTestRule.onNodeWithTag("manual_amount_input").performScrollTo().performTextInput("120")
+        composeTestRule.onNodeWithTag("manual_save_button").performClick()
+
+        awaitMainLooperCondition {
+            transactionsVm.uiState.value.allTransactions.size == 1
+        }
+        val savedTx = transactionsVm.uiState.value.allTransactions.first()
+        assertEquals("عشاء أمس", savedTx.description)
+        assertEquals(12_000L, savedTx.amountMinorUnits)
+        assertEquals(yesterdayIso, MoneyUtils.epochMillisToIsoDate(savedTx.transactionDate))
+    }
+
+    @Test
+    fun `editing an existing transaction via ManualTransactionDialog displays its saved date and updates date while preserving amount, category, type, and currency`() {
+        val originalSavedIso = "2026-10-15"
+        val originalSavedMillis = MoneyUtils.isoDateToEpochMillis(originalSavedIso)!!
+        val existingUsdTx = runBlocking {
+            prefsRepository.setCurrency("EGP")
+            repository.saveManualTransaction(
+                description = "اشتراك أداة تصميم",
+                amountMinorUnits = 15_000L, // 150.00 USD
+                currencyCode = "USD",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_BILLS,
+                transactionDate = originalSavedMillis,
+                notes = "Annual billing"
+            ).getOrThrow()
+        }
+
+        val categories = runBlocking { database.dao().getAllCategories() }
+        var savedIsoFromDialog: String? = null
+
+        composeTestRule.setContent {
+            ManualTransactionDialog(
+                initialType = existingUsdTx.type,
+                existingTransaction = existingUsdTx,
+                categories = categories,
+                currencySymbol = "$",
+                onDismiss = {},
+                onSave = { existingId, desc, amount, type, catId, isoDate, notes, isRefundOffset ->
+                    savedIsoFromDialog = isoDate
+                    runBlocking {
+                        repository.saveManualTransaction(
+                            existingId = existingId,
+                            description = desc,
+                            amountMinorUnits = MoneyUtils.parseAmountToMinorUnits(amount)!!,
+                            currencyCode = "EGP", // repository + preserveExistingCurrency keeps USD
+                            type = type,
+                            categoryId = catId,
+                            transactionDate = MoneyUtils.isoDateToEpochMillis(isoDate)!!,
+                            notes = notes,
+                            isRefundOffset = isRefundOffset,
+                            preserveExistingCurrency = true
+                        )
+                    }
+                }
+            )
+        }
+        composeTestRule.waitForIdle()
+
+        // 1. Verify existing transaction's actual saved date ("2026-10-15") is displayed
+        composeTestRule.onNodeWithTag("manual_date_input").assertTextContains("2026-10-15")
+        composeTestRule.onNodeWithTag("manual_selected_date_text").assertTextContains("2026-10-15", substring = true)
+
+        // 2. Open calendar date picker -> starts on October 2026 and allows selecting October 20, 2026
+        composeTestRule.onNodeWithTag("manual_open_calendar_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("calendar_month_year_title").assertTextContains("أكتوبر 2026")
+        composeTestRule.onNodeWithTag("calendar_day_2026-10-20").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("calendar_confirm_button").performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("manual_date_input").assertTextContains("2026-10-20")
+
+        // 3. Save edited transaction and verify only transactionDate changed while amount, category, type, and USD currency are preserved
+        composeTestRule.onNodeWithTag("manual_save_button").performClick()
+        composeTestRule.waitForIdle()
+
+        assertEquals("2026-10-20", savedIsoFromDialog)
+        val updatedTx = runBlocking { database.dao().getTransactionById(existingUsdTx.id)!! }
+        assertEquals("2026-10-20", MoneyUtils.epochMillisToIsoDate(updatedTx.transactionDate))
+        assertEquals("اشتراك أداة تصميم", updatedTx.description)
+        assertEquals(15_000L, updatedTx.amountMinorUnits)
+        assertEquals("USD", updatedTx.currencyCode)
+        assertEquals(DefaultCategories.CAT_BILLS, updatedTx.categoryId)
+        assertEquals(TransactionType.EXPENSE, updatedTx.type)
+        assertEquals("Annual billing", updatedTx.notes)
+    }
+
+    @Test
+    fun `AI entry preserves parsed dates, applies manual date overrides with precedence, and persists selected dates`() {
+        val container = createTestAppContainer(
+            defaultDispatcher = Dispatchers.Main,
+            ioDispatcher = Dispatchers.Main
+        )
+        val aiEntryVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[AiEntryViewModel::class.java]
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.categories.isNotEmpty()
+        }
+
+        // 1. When user has NOT manually selected a date, AI/parser-detected dates are preserved
+        aiEntryVm.updateAiInputText("اشتريت قهوة بـ 25 جنيه 2026-10-20\nطماطم 20")
+        aiEntryVm.analyzeAiInput(useLocalParserOnly = true)
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult != null
+        }
+
+        val initialProposals = aiEntryVm.uiState.value.aiParseResult!!.proposals
+        assertEquals(2, initialProposals.size)
+        assertEquals("2026-10-20", initialProposals[0].isoDate)
+        assertTrue(initialProposals[0].aiDetectedDate)
+        assertEquals(MoneyUtils.todayIsoDate(), initialProposals[1].isoDate)
+        assertFalse(initialProposals[1].aiDetectedDate)
+
+        // 2. User manually overrides the second draft's date -> userModifiedDate becomes true and takes precedence
+        val secondDraft = initialProposals[1]
+        aiEntryVm.updateProposedDraft(secondDraft.copy(isoDate = "2026-10-18"))
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult?.proposals?.get(1)?.isoDate == "2026-10-18"
+        }
+        assertTrue(aiEntryVm.uiState.value.aiParseResult!!.proposals[1].userModifiedDate)
+
+        // Re-analyzing the same input must NOT overwrite the user's manual date override on draft[1]
+        aiEntryVm.analyzeAiInput(useLocalParserOnly = true)
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult != null && !aiEntryVm.uiState.value.isAiParsing
+        }
+        val reanalyzedProposals = aiEntryVm.uiState.value.aiParseResult!!.proposals
+        assertEquals("2026-10-20", reanalyzedProposals[0].isoDate)
+        assertEquals("2026-10-18", reanalyzedProposals[1].isoDate)
+        assertTrue(reanalyzedProposals[1].userModifiedDate)
+
+        // 3. Selecting a batch manual date via selectAiTransactionDate updates proposals and takes precedence over AI
+        aiEntryVm.selectAiTransactionDate("2026-10-12")
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.selectedTransactionIsoDate == "2026-10-12" &&
+                aiEntryVm.uiState.value.isDateManuallySelected
+        }
+        assertTrue(aiEntryVm.uiState.value.aiParseResult!!.proposals.all { it.isoDate == "2026-10-12" })
+
+        // Save all reviewed proposals and verify persisted transactionDate in Room
+        aiEntryVm.saveAllReviewedProposals()
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult == null
+        }
+
+        val savedTxs = runBlocking { database.dao().getAllTransactions() }
+        assertEquals(2, savedTxs.size)
+        assertTrue(savedTxs.all { MoneyUtils.epochMillisToIsoDate(it.transactionDate) == "2026-10-12" })
     }
 }

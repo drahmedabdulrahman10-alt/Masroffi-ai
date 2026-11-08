@@ -2,6 +2,7 @@ package com.example.domain.ai
 
 import com.example.data.local.CategoryEntity
 import com.example.data.local.TransactionType
+import com.example.domain.MoneyUtils
 import java.util.UUID
 
 data class ProposedTransactionDraft(
@@ -19,13 +20,16 @@ data class ProposedTransactionDraft(
     val ambiguityReason: String? = null,
     val isRefundOffset: Boolean = false,
     val suggestedCategoryId: String? = categoryId,
-    val userConfirmedCategory: Boolean = false
+    val userConfirmedCategory: Boolean = false,
+    val aiDetectedDate: Boolean = false,
+    val userModifiedDate: Boolean = false
 ) {
     val isValidToSave: Boolean
         get() = description.isNotBlank() &&
             amountMinorUnits != null &&
             amountMinorUnits > 0L &&
-            isoDate.isNotBlank()
+            isoDate.isNotBlank() &&
+            MoneyUtils.isoDateToEpochMillis(isoDate) != null
 }
 
 data class AiParseResult(

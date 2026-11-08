@@ -11,8 +11,11 @@ import com.example.data.local.TransactionType
 import com.example.domain.BudgetStatus
 import com.example.domain.FinancialCalculator
 import com.example.domain.MoneyUtils
+import com.example.domain.QuickDateOption
 import com.example.domain.ai.EgyptianArabicLocalParser
 import com.example.domain.ai.RemoteAiProviderClient
+import java.time.LocalDate
+import java.time.YearMonth
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -854,5 +857,188 @@ class ExampleUnitTest {
             assertNotNull(arabicIsoMillis)
             assertEquals("2026-11-01", MoneyUtils.epochMillisToIsoDate(arabicIsoMillis!!, zoneId))
         }
+    }
+
+    // --- G. Task 6: Calendar Date Picker & Quick Date Selection Unit Tests ---
+
+    @Test
+    fun `quick date selection dynamically computes Today, Yesterday, and Day Before Yesterday across month, year, and leap-year boundaries`() {
+        val cairoZone = ZoneId.of("Africa/Cairo")
+
+        // 1. Standard mid-month reference date: 2026-11-08
+        val nov8Millis = MoneyUtils.isoDateToEpochMillis("2026-11-08", cairoZone)!!
+        assertEquals("2026-11-08", MoneyUtils.resolveQuickDateIso(QuickDateOption.TODAY, nov8Millis, cairoZone))
+        assertEquals("2026-11-07", MoneyUtils.resolveQuickDateIso(QuickDateOption.YESTERDAY, nov8Millis, cairoZone))
+        assertEquals("2026-11-06", MoneyUtils.resolveQuickDateIso(QuickDateOption.DAY_BEFORE_YESTERDAY, nov8Millis, cairoZone))
+
+        assertEquals(QuickDateOption.TODAY, MoneyUtils.matchQuickDateOption("2026-11-08", nov8Millis, cairoZone))
+        assertEquals(QuickDateOption.YESTERDAY, MoneyUtils.matchQuickDateOption("2026-11-07", nov8Millis, cairoZone))
+        assertEquals(QuickDateOption.DAY_BEFORE_YESTERDAY, MoneyUtils.matchQuickDateOption("2026-11-06", nov8Millis, cairoZone))
+        assertNull(MoneyUtils.matchQuickDateOption("2026-11-05", nov8Millis, cairoZone))
+
+        // Eastern Arabic digits in selectedIsoDate must also match QuickDateOption
+        assertEquals(QuickDateOption.TODAY, MoneyUtils.matchQuickDateOption("٢٠٢٦-١١-٠٨", nov8Millis, cairoZone))
+        assertEquals(QuickDateOption.YESTERDAY, MoneyUtils.matchQuickDateOption("٢٠٢٦-١١-٠٧", nov8Millis, cairoZone))
+
+        // 2. Month boundary: November 1, 2026 -> Yesterday is October 31, Day Before Yesterday is October 30
+        val nov1Millis = MoneyUtils.isoDateToEpochMillis("2026-11-01", cairoZone)!!
+        assertEquals("2026-11-01", MoneyUtils.resolveQuickDateIso(QuickDateOption.TODAY, nov1Millis, cairoZone))
+        assertEquals("2026-10-31", MoneyUtils.resolveQuickDateIso(QuickDateOption.YESTERDAY, nov1Millis, cairoZone))
+        assertEquals("2026-10-30", MoneyUtils.resolveQuickDateIso(QuickDateOption.DAY_BEFORE_YESTERDAY, nov1Millis, cairoZone))
+
+        // 3. Year boundary: January 1, 2026 -> Yesterday is December 31, 2025; Day Before Yesterday is December 30, 2025
+        val jan1Millis = MoneyUtils.isoDateToEpochMillis("2026-01-01", cairoZone)!!
+        assertEquals("2026-01-01", MoneyUtils.resolveQuickDateIso(QuickDateOption.TODAY, jan1Millis, cairoZone))
+        assertEquals("2025-12-31", MoneyUtils.resolveQuickDateIso(QuickDateOption.YESTERDAY, jan1Millis, cairoZone))
+        assertEquals("2025-12-30", MoneyUtils.resolveQuickDateIso(QuickDateOption.DAY_BEFORE_YESTERDAY, jan1Millis, cairoZone))
+
+        // Year boundary forward: December 31, 2026 -> next day is January 1, 2027, next month is 2027-01
+        val dec31Date = LocalDate.of(2026, 12, 31)
+        assertEquals(LocalDate.of(2027, 1, 1), dec31Date.plusDays(1))
+        assertEquals("2027-01", MoneyUtils.nextYearMonth("2026-12"))
+        assertEquals("2025-12", MoneyUtils.previousYearMonth("2026-01"))
+
+        // 4. Non-leap year boundary: March 1, 2025 -> Yesterday is February 28, 2025; Day Before Yesterday is February 27, 2025
+        val mar1NonLeapMillis = MoneyUtils.isoDateToEpochMillis("2025-03-01", cairoZone)!!
+        assertEquals("2025-02-28", MoneyUtils.resolveQuickDateIso(QuickDateOption.YESTERDAY, mar1NonLeapMillis, cairoZone))
+        assertEquals("2025-02-27", MoneyUtils.resolveQuickDateIso(QuickDateOption.DAY_BEFORE_YESTERDAY, mar1NonLeapMillis, cairoZone))
+
+        // 5. Leap year boundary: March 1, 2024 -> Yesterday is February 29, 2024; Day Before Yesterday is February 28, 2024
+        val mar1LeapMillis = MoneyUtils.isoDateToEpochMillis("2024-03-01", cairoZone)!!
+        assertEquals("2024-02-29", MoneyUtils.resolveQuickDateIso(QuickDateOption.YESTERDAY, mar1LeapMillis, cairoZone))
+        assertEquals("2024-02-28", MoneyUtils.resolveQuickDateIso(QuickDateOption.DAY_BEFORE_YESTERDAY, mar1LeapMillis, cairoZone))
+    }
+
+    @Test
+    fun `calendar month grid builder and date conversions preserve intended calendar day across Africa_Cairo, Asia_Riyadh, and UTC`() {
+        // 1. Leap year February 2024 has 29 days, non-leap February 2025 has 28 days
+        val feb2024Cells = MoneyUtils.buildCalendarMonthCells(YearMonth.of(2024, 2))
+        assertEquals(0, feb2024Cells.size % 7)
+        val feb2024Dates = feb2024Cells.filterNotNull()
+        assertEquals(29, feb2024Dates.size)
+        assertEquals(LocalDate.of(2024, 2, 1), feb2024Dates.first())
+        assertEquals(LocalDate.of(2024, 2, 29), feb2024Dates.last())
+
+        val feb2025Cells = MoneyUtils.buildCalendarMonthCells(YearMonth.of(2025, 2))
+        assertEquals(0, feb2025Cells.size % 7)
+        val feb2025Dates = feb2025Cells.filterNotNull()
+        assertEquals(28, feb2025Dates.size)
+        assertEquals(LocalDate.of(2025, 2, 1), feb2025Dates.first())
+        assertEquals(LocalDate.of(2025, 2, 28), feb2025Dates.last())
+        // 2025-02-01 is a Saturday -> column 0 (no leading nulls)
+        assertEquals(LocalDate.of(2025, 2, 1), feb2025Cells[0])
+
+        // 2. Round-trip persistence and timezone check across Africa/Cairo, Asia/Riyadh, and UTC
+        val criticalIsoDates = listOf(
+            "2024-02-29",
+            "2025-02-28",
+            "2025-12-31",
+            "2026-01-01",
+            "2026-10-31",
+            "2026-11-01",
+            "2026-12-31",
+            "2027-01-01"
+        )
+        val zones = listOf(
+            ZoneId.of("Africa/Cairo"),
+            ZoneId.of("Asia/Riyadh"),
+            ZoneId.of("UTC")
+        )
+        for (zone in zones) {
+            for (iso in criticalIsoDates) {
+                val epochMillis = MoneyUtils.isoDateToEpochMillis(iso, zone)
+                assertNotNull("Expected valid epochMillis for $iso in $zone", epochMillis)
+                val roundTripIso = MoneyUtils.epochMillisToIsoDate(epochMillis!!, zone)
+                assertEquals("Timezone shift detected for $iso in $zone", iso, roundTripIso)
+            }
+        }
+
+        // 3. Banner formatting for quick-date vs custom calendar date
+        val cairoZone = ZoneId.of("Africa/Cairo")
+        val refMillis = MoneyUtils.isoDateToEpochMillis("2026-11-08", cairoZone)!!
+        assertEquals(
+            "اليوم (2026-11-08)",
+            MoneyUtils.formatSelectedDateBannerText("2026-11-08", refMillis, cairoZone)
+        )
+        assertEquals(
+            "أمس (2026-11-07)",
+            MoneyUtils.formatSelectedDateBannerText("2026-11-07", refMillis, cairoZone)
+        )
+        assertEquals(
+            "أول أمس (2026-11-06)",
+            MoneyUtils.formatSelectedDateBannerText("2026-11-06", refMillis, cairoZone)
+        )
+        assertEquals(
+            "15 أكتوبر 2026 (2026-10-15)",
+            MoneyUtils.formatSelectedDateBannerText("2026-10-15", refMillis, cairoZone)
+        )
+    }
+
+    @Test
+    fun `AI and local parser preserve identified dates, use default Today when unspecified, and support manual date override`() {
+        // 1. Local parser identifies relative dates ("أمس", "أول أمس") and explicit ISO dates without inventing dates
+        val parsedRelative = EgyptianArabicLocalParser.parseNaturalText(
+            rawText = "اشتريت قهوة بـ 25 جنيه أمس\nدفعت تاكسي 30 جنيه أول أمس\nطماطم 20",
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList()
+        )
+        assertEquals(3, parsedRelative.proposals.size)
+        assertEquals("2026-10-31", parsedRelative.proposals[0].isoDate)
+        assertTrue(parsedRelative.proposals[0].aiDetectedDate)
+        assertEquals("قهوة", parsedRelative.proposals[0].description)
+
+        assertEquals("2026-10-30", parsedRelative.proposals[1].isoDate)
+        assertTrue(parsedRelative.proposals[1].aiDetectedDate)
+        assertEquals("تاكسي", parsedRelative.proposals[1].description)
+
+        // Third line has no date mentioned -> defaults to todayIsoDate ("2026-11-01") with aiDetectedDate = false
+        assertEquals("2026-11-01", parsedRelative.proposals[2].isoDate)
+        assertFalse(parsedRelative.proposals[2].aiDetectedDate)
+
+        // 2. Remote AI JSON response with explicit date vs omitted date
+        val aiJson = """
+            {
+              "transactions": [
+                {
+                  "description": "غداء عمل",
+                  "amount": "150.00",
+                  "currency": "EGP",
+                  "type": "EXPENSE",
+                  "date": "2026-10-20",
+                  "categoryId": "${DefaultCategories.CAT_FOOD}",
+                  "notes": "",
+                  "confidence": 0.95
+                },
+                {
+                  "description": "قهوة",
+                  "amount": "30.00",
+                  "currency": "EGP",
+                  "type": "EXPENSE",
+                  "categoryId": "${DefaultCategories.CAT_FOOD}",
+                  "notes": "",
+                  "confidence": 0.95
+                }
+              ],
+              "needsClarification": false,
+              "clarificationQuestion": null
+            }
+        """.trimIndent()
+
+        val validated = EgyptianArabicLocalParser.validateAndMapAiJsonResponse(
+            rawJsonResponse = aiJson,
+            todayIsoDate = "2026-11-01",
+            defaultCurrency = "EGP",
+            eligibleCategories = defaultCategories,
+            learnedRules = emptyList(),
+            providerLabel = "TestProvider"
+        ).getOrThrow()
+
+        assertEquals(2, validated.proposals.size)
+        assertEquals("2026-10-20", validated.proposals[0].isoDate)
+        assertTrue(validated.proposals[0].aiDetectedDate)
+        assertEquals("2026-11-01", validated.proposals[1].isoDate)
+        assertFalse(validated.proposals[1].aiDetectedDate)
     }
 }

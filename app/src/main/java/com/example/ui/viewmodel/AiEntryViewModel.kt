@@ -21,6 +21,8 @@ data class AiEntryUiState(
     val preferences: AppPreferencesState = AppPreferencesState(),
     val categories: List<CategoryEntity> = emptyList(),
     val aiInputText: String = "",
+    val selectedTransactionIsoDate: String = MoneyUtils.todayIsoDate(),
+    val isDateManuallySelected: Boolean = false,
     val isAiParsing: Boolean = false,
     val aiParseResult: AiParseResult? = null,
     val aiErrorMessage: String? = null,
@@ -31,6 +33,8 @@ data class AiEntryUiState(
 
 private data class LocalAiState(
     val aiInputText: String = "",
+    val selectedTransactionIsoDate: String = MoneyUtils.todayIsoDate(),
+    val isDateManuallySelected: Boolean = false,
     val isAiParsing: Boolean = false,
     val aiParseResult: AiParseResult? = null,
     val aiErrorMessage: String? = null
@@ -54,6 +58,8 @@ class AiEntryViewModel(
             preferences = prefs,
             categories = categories,
             aiInputText = local.aiInputText,
+            selectedTransactionIsoDate = local.selectedTransactionIsoDate,
+            isDateManuallySelected = local.isDateManuallySelected,
             isAiParsing = local.isAiParsing,
             aiParseResult = local.aiParseResult,
             aiErrorMessage = local.aiErrorMessage,
@@ -73,6 +79,39 @@ class AiEntryViewModel(
         }
     }
 
+    /**
+     * Allows the user to explicitly select a transaction date for AI entry (e.g. Today, Yesterday,
+     * Day Before Yesterday, or from the Calendar Date Picker). A manually selected date takes
+     * precedence over AI-parsed or default dates and is never overwritten by AI.
+     */
+    fun selectAiTransactionDate(isoDate: String) {
+        val normalizedIso = MoneyUtils.parseIsoLocalDate(isoDate)?.let {
+            MoneyUtils.formatLocalDateToIso(it)
+        } ?: MoneyUtils.normalizeDigits(isoDate.trim())
+
+        localAiState.update { state ->
+            val updatedParseResult = state.aiParseResult?.let { currentResult ->
+                if (MoneyUtils.isoDateToEpochMillis(normalizedIso) != null) {
+                    val updatedProposals = currentResult.proposals.map { draft ->
+                        draft.copy(
+                            isoDate = normalizedIso,
+                            userModifiedDate = true
+                        )
+                    }
+                    currentResult.copy(proposals = updatedProposals)
+                } else {
+                    currentResult
+                }
+            }
+            state.copy(
+                selectedTransactionIsoDate = normalizedIso,
+                isDateManuallySelected = true,
+                aiParseResult = updatedParseResult,
+                aiErrorMessage = null
+            )
+        }
+    }
+
     fun appendRecognizedSpeech(spokenText: String) {
         if (spokenText.isBlank()) return
         localAiState.update { state ->
@@ -86,12 +125,18 @@ class AiEntryViewModel(
     }
 
     fun analyzeAiInput(useLocalParserOnly: Boolean = false) {
-        val currentText = localAiState.value.aiInputText.trim()
+        val currentState = localAiState.value
+        val currentText = currentState.aiInputText.trim()
         if (currentText.isEmpty()) {
             localAiState.update {
                 it.copy(aiErrorMessage = "يرجى كتابة أو إملاء معاملة واحدة على الأقل قبل التحليل.")
             }
             return
+        }
+
+        val previousProposals = currentState.aiParseResult?.proposals.orEmpty()
+        val manualBatchDate = currentState.selectedTransactionIsoDate.takeIf {
+            currentState.isDateManuallySelected && MoneyUtils.isoDateToEpochMillis(it) != null
         }
 
         localAiState.update {
@@ -107,7 +152,17 @@ class AiEntryViewModel(
             )
 
             parseRes.fold(
-                onSuccess = { result ->
+                onSuccess = { rawResult ->
+                    val latestState = localAiState.value
+                    val activeManualDate = latestState.selectedTransactionIsoDate.takeIf {
+                        latestState.isDateManuallySelected && MoneyUtils.isoDateToEpochMillis(it) != null
+                    } ?: manualBatchDate
+                    val result = applyManualDatePrecedence(
+                        parseResult = rawResult,
+                        manualBatchDate = activeManualDate,
+                        previousProposals = previousProposals
+                    )
+
                     val prefs = uiState.value.preferences
                     val canAutoSave = prefs.autoSaveEnabled &&
                         result.proposals.isNotEmpty() &&
@@ -130,6 +185,8 @@ class AiEntryViewModel(
                                     it.copy(
                                         isAiParsing = false,
                                         aiInputText = "",
+                                        selectedTransactionIsoDate = MoneyUtils.todayIsoDate(),
+                                        isDateManuallySelected = false,
                                         aiParseResult = null,
                                         aiErrorMessage = null
                                     )
@@ -168,10 +225,49 @@ class AiEntryViewModel(
         }
     }
 
+    private fun applyManualDatePrecedence(
+        parseResult: AiParseResult,
+        manualBatchDate: String?,
+        previousProposals: List<ProposedTransactionDraft>
+    ): AiParseResult {
+        if (manualBatchDate == null && previousProposals.none { it.userModifiedDate }) {
+            return parseResult
+        }
+        val mergedProposals = parseResult.proposals.mapIndexed { index, draft ->
+            val previousManualDraft = previousProposals.getOrNull(index)?.takeIf {
+                it.userModifiedDate && MoneyUtils.isoDateToEpochMillis(it.isoDate) != null
+            } ?: previousProposals.firstOrNull {
+                it.userModifiedDate &&
+                    it.description.equals(draft.description, ignoreCase = true) &&
+                    MoneyUtils.isoDateToEpochMillis(it.isoDate) != null
+            }
+
+            when {
+                previousManualDraft != null -> draft.copy(
+                    isoDate = previousManualDraft.isoDate,
+                    userModifiedDate = true
+                )
+                manualBatchDate != null -> draft.copy(
+                    isoDate = manualBatchDate,
+                    userModifiedDate = true
+                )
+                else -> draft
+            }
+        }
+        return parseResult.copy(proposals = mergedProposals)
+    }
+
     fun updateProposedDraft(updatedDraft: ProposedTransactionDraft) {
         val currentResult = localAiState.value.aiParseResult ?: return
+        val existingDraft = currentResult.proposals.firstOrNull { it.draftId == updatedDraft.draftId }
+        val normalizedIsoDate = MoneyUtils.parseIsoLocalDate(updatedDraft.isoDate)?.let {
+            MoneyUtils.formatLocalDateToIso(it)
+        } ?: updatedDraft.isoDate
+        val userChangedDate = updatedDraft.userModifiedDate ||
+            (existingDraft != null && existingDraft.isoDate != normalizedIsoDate)
+
         val recalculatedMinor = MoneyUtils.parseAmountToMinorUnits(updatedDraft.amountText)
-        val hasValidDate = MoneyUtils.isoDateToEpochMillis(updatedDraft.isoDate) != null
+        val hasValidDate = MoneyUtils.isoDateToEpochMillis(normalizedIsoDate) != null
         val isNowAmbiguous = recalculatedMinor == null ||
             recalculatedMinor <= 0L ||
             updatedDraft.description.isBlank() ||
@@ -187,9 +283,11 @@ class AiEntryViewModel(
         }
 
         val normalizedDraft = updatedDraft.copy(
+            isoDate = normalizedIsoDate,
             amountMinorUnits = recalculatedMinor,
             isAmbiguous = isNowAmbiguous,
-            ambiguityReason = ambiguityReason
+            ambiguityReason = ambiguityReason,
+            userModifiedDate = userChangedDate
         )
 
         val updatedList = currentResult.proposals.map {
@@ -224,7 +322,12 @@ class AiEntryViewModel(
 
     fun cancelAiReview() {
         localAiState.update {
-            it.copy(aiParseResult = null, aiErrorMessage = null)
+            it.copy(
+                selectedTransactionIsoDate = MoneyUtils.todayIsoDate(),
+                isDateManuallySelected = false,
+                aiParseResult = null,
+                aiErrorMessage = null
+            )
         }
     }
 
@@ -246,6 +349,8 @@ class AiEntryViewModel(
                     localAiState.update {
                         it.copy(
                             aiInputText = "",
+                            selectedTransactionIsoDate = MoneyUtils.todayIsoDate(),
+                            isDateManuallySelected = false,
                             aiParseResult = null,
                             aiErrorMessage = null
                         )

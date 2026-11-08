@@ -165,7 +165,8 @@ fun MasroofiApp(
                     aiEntryViewModel.saveAllReviewedProposals(
                         onSavedSuccess = { showAiEntryScreen = false }
                     )
-                }
+                },
+                onSelectBatchDate = aiEntryViewModel::selectAiTransactionDate
             )
         } else {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {

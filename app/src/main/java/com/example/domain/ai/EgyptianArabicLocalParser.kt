@@ -5,6 +5,7 @@ import com.example.data.local.CategoryRuleEntity
 import com.example.data.local.RefundAccountingMode
 import com.example.data.local.TransactionType
 import com.example.domain.MoneyUtils
+import com.example.domain.QuickDateOption
 import com.squareup.moshi.JsonReader
 import okio.Buffer
 import java.util.Locale
@@ -158,6 +159,19 @@ object EgyptianArabicLocalParser {
     private val trailingBiRegex = Regex("""\s+بـ?\s*$""")
     private val whitespaceRegex = Regex("""\s+""")
     private val tokenSplitRegex = Regex("""[^\p{L}\p{N}]+""")
+    private val embeddedIsoDateRegex = Regex("""(?<=^|\s)(\d{4}-\d{2}-\d{2})(?=\s|$|[،,.;؛])""")
+    private val dayBeforeYesterdayPhraseRegex = Regex(
+        """(?<=^|\s)(?:أول\s+أمس|اول\s+امس|أول\s+امس|اول\s+أمس|أول\s+امبارح|اول\s+امبارح|أول\s+إمبارح|اول\s+إمبارح|day\s+before\s+yesterday)(?=\s|$|[،,.;؛])""",
+        RegexOption.IGNORE_CASE
+    )
+    private val yesterdayPhraseRegex = Regex(
+        """(?<=^|\s)(?:أمس|امس|امبارح|إمبارح|البارحة|yesterday)(?=\s|$|[،,.;؛])""",
+        RegexOption.IGNORE_CASE
+    )
+    private val todayPhraseRegex = Regex(
+        """(?<=^|\s)(?:اليوم|النهارده|النهاردة|today)(?=\s|$|[،,.;؛])""",
+        RegexOption.IGNORE_CASE
+    )
 
     private val categoryKeywordDictionary: Map<String, List<String>> = mapOf(
         "أكل وشرب" to listOf(
@@ -324,6 +338,56 @@ object EgyptianArabicLocalParser {
         return refundKeywords.any { containsWholePhrase(lower, it) }
     }
 
+    private data class ExtractedDate(
+        val isoDate: String,
+        val matchedSpan: String
+    )
+
+    private fun extractSegmentDate(segment: String, todayIsoDate: String): ExtractedDate? {
+        val normalized = MoneyUtils.normalizeDigits(segment)
+        val referenceDate = MoneyUtils.parseIsoLocalDate(todayIsoDate) ?: return null
+
+        val isoMatch = embeddedIsoDateRegex.find(normalized)
+        if (isoMatch != null) {
+            val parsed = MoneyUtils.parseIsoLocalDate(isoMatch.groupValues[1])
+            if (parsed != null) {
+                return ExtractedDate(
+                    isoDate = MoneyUtils.formatLocalDateToIso(parsed),
+                    matchedSpan = isoMatch.value
+                )
+            }
+        }
+
+        val dayBeforeMatch = dayBeforeYesterdayPhraseRegex.find(normalized)
+        if (dayBeforeMatch != null) {
+            val resolved = MoneyUtils.resolveQuickDate(QuickDateOption.DAY_BEFORE_YESTERDAY, referenceDate)
+            return ExtractedDate(
+                isoDate = MoneyUtils.formatLocalDateToIso(resolved),
+                matchedSpan = dayBeforeMatch.value
+            )
+        }
+
+        val yesterdayMatch = yesterdayPhraseRegex.find(normalized)
+        if (yesterdayMatch != null) {
+            val resolved = MoneyUtils.resolveQuickDate(QuickDateOption.YESTERDAY, referenceDate)
+            return ExtractedDate(
+                isoDate = MoneyUtils.formatLocalDateToIso(resolved),
+                matchedSpan = yesterdayMatch.value
+            )
+        }
+
+        val todayMatch = todayPhraseRegex.find(normalized)
+        if (todayMatch != null) {
+            val resolved = MoneyUtils.resolveQuickDate(QuickDateOption.TODAY, referenceDate)
+            return ExtractedDate(
+                isoDate = MoneyUtils.formatLocalDateToIso(resolved),
+                matchedSpan = todayMatch.value
+            )
+        }
+
+        return null
+    }
+
     private fun parseSingleSegment(
         segment: String,
         todayIsoDate: String,
@@ -333,8 +397,14 @@ object EgyptianArabicLocalParser {
         refundAccountingMode: RefundAccountingMode
     ): ProposedTransactionDraft? {
         val txType = detectTransactionType(segment)
-        val extractedAmount = extractMonetaryAmount(segment)
-        val cleanDescription = extractCleanDescription(segment, extractedAmount?.matchedSpan)
+        val extractedDate = extractSegmentDate(segment, todayIsoDate)
+        val segmentWithoutDate = if (extractedDate != null) {
+            MoneyUtils.normalizeDigits(segment).replaceFirst(extractedDate.matchedSpan, " ").trim()
+        } else {
+            segment
+        }
+        val extractedAmount = extractMonetaryAmount(segmentWithoutDate)
+        val cleanDescription = extractCleanDescription(segmentWithoutDate, extractedAmount?.matchedSpan)
 
         if (cleanDescription.isBlank() && extractedAmount == null) {
             return null
@@ -354,13 +424,13 @@ object EgyptianArabicLocalParser {
             // Try matching the original expense category being refunded first, falling back to income refund category
             matchBestCategory(
                 description = finalDesc,
-                fullSegment = segment,
+                fullSegment = segmentWithoutDate,
                 type = TransactionType.EXPENSE,
                 activeCategories = activeCategories,
                 learnedRules = learnedRules
             ) ?: matchBestCategory(
                 description = finalDesc,
-                fullSegment = segment,
+                fullSegment = segmentWithoutDate,
                 type = TransactionType.INCOME,
                 activeCategories = activeCategories,
                 learnedRules = learnedRules
@@ -368,7 +438,7 @@ object EgyptianArabicLocalParser {
         } else {
             matchBestCategory(
                 description = finalDesc,
-                fullSegment = segment,
+                fullSegment = segmentWithoutDate,
                 type = txType,
                 activeCategories = activeCategories,
                 learnedRules = learnedRules
@@ -400,7 +470,7 @@ object EgyptianArabicLocalParser {
             amountMinorUnits = amountMinor,
             currencyCode = extractedAmount?.currencyCode ?: defaultCurrency,
             type = txType,
-            isoDate = todayIsoDate,
+            isoDate = extractedDate?.isoDate ?: todayIsoDate,
             categoryId = matchedCategory?.id,
             notes = "",
             confidence = confidence,
@@ -408,7 +478,9 @@ object EgyptianArabicLocalParser {
             ambiguityReason = ambiguityReason,
             isRefundOffset = isRefundOffset,
             suggestedCategoryId = matchedCategory?.id,
-            userConfirmedCategory = false
+            userConfirmedCategory = false,
+            aiDetectedDate = extractedDate != null,
+            userModifiedDate = false
         )
     }
 
@@ -740,7 +812,7 @@ object EgyptianArabicLocalParser {
         var rawAmount = ""
         var rawCurrency: String? = null
         var rawType = "EXPENSE"
-        var rawDate = todayIsoDate
+        var rawDate: String? = null
         var rawCatId: String? = null
         var notes = ""
         var confidence = 0.85f
@@ -752,7 +824,9 @@ object EgyptianArabicLocalParser {
                 "amount" -> rawAmount = readNullableString(reader).orEmpty().trim()
                 "currency" -> rawCurrency = readNullableString(reader)?.trim()
                 "type" -> rawType = readNullableString(reader).orEmpty().uppercase(Locale.US).trim()
-                "date" -> rawDate = readNullableString(reader).orEmpty().trim()
+                "date" -> rawDate = readNullableString(reader)?.trim()?.takeIf {
+                    it.isNotBlank() && it != "null"
+                }
                 "categoryId" -> rawCatId = readNullableString(reader)?.trim()?.takeIf {
                     it.isNotBlank() && it != "null"
                 }
@@ -780,7 +854,8 @@ object EgyptianArabicLocalParser {
             )
         }
 
-        val validDateEpoch = MoneyUtils.isoDateToEpochMillis(rawDate.ifEmpty { todayIsoDate })
+        val validDateEpoch = rawDate?.let { MoneyUtils.isoDateToEpochMillis(it) }
+        val aiDetectedDate = validDateEpoch != null
         val finalIsoDate = if (validDateEpoch != null) {
             MoneyUtils.epochMillisToIsoDate(validDateEpoch)
         } else {
@@ -854,7 +929,9 @@ object EgyptianArabicLocalParser {
             ambiguityReason = ambiguityReason,
             isRefundOffset = isRefundOffset,
             suggestedCategoryId = verifiedCategory?.id,
-            userConfirmedCategory = false
+            userConfirmedCategory = false,
+            aiDetectedDate = aiDetectedDate,
+            userModifiedDate = false
         )
     }
 

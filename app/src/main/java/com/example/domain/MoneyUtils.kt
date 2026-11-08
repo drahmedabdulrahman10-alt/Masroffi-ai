@@ -14,6 +14,15 @@ import java.time.format.DateTimeFormatter
 import java.time.format.ResolverStyle
 import java.util.Locale
 
+enum class QuickDateOption(
+    val daysOffset: Long,
+    val arabicLabel: String
+) {
+    TODAY(daysOffset = 0L, arabicLabel = "اليوم"),
+    YESTERDAY(daysOffset = -1L, arabicLabel = "أمس"),
+    DAY_BEFORE_YESTERDAY(daysOffset = -2L, arabicLabel = "أول أمس")
+}
+
 /**
  * Exact monetary and date utilities for Masroofi AI.
  * Stores all monetary amounts in integer minor units (e.g., 100 piastres = 1.00 EGP).
@@ -196,15 +205,145 @@ object MoneyUtils {
         isoDate: String?,
         zoneId: ZoneId = ZoneId.systemDefault()
     ): Long? {
+        val parsedDate = parseIsoLocalDate(isoDate) ?: return null
+        return parsedDate.atStartOfDay(zoneId).toInstant().toEpochMilli()
+    }
+
+    /**
+     * Strictly parses an ISO date string (YYYY-MM-DD, supporting Western, Eastern Arabic, or Persian digits)
+     * into a LocalDate using ResolverStyle.STRICT. Returns null if invalid.
+     */
+    fun parseIsoLocalDate(isoDate: String?): LocalDate? {
         if (isoDate.isNullOrBlank()) return null
         val normalized = normalizeDigits(isoDate.trim())
         if (!isoDateFormatRegex.matches(normalized)) return null
         return try {
-            val parsedDate = LocalDate.parse(normalized, isoDateFormatter)
-            parsedDate.atStartOfDay(zoneId).toInstant().toEpochMilli()
+            LocalDate.parse(normalized, isoDateFormatter)
         } catch (e: Exception) {
             null
         }
+    }
+
+    fun formatLocalDateToIso(date: LocalDate): String {
+        return date.format(isoDateFormatter)
+    }
+
+    /**
+     * Dynamically calculates the LocalDate for Today, Yesterday, or Day Before Yesterday
+     * relative to the provided reference LocalDate.
+     */
+    fun resolveQuickDate(
+        option: QuickDateOption,
+        referenceDate: LocalDate
+    ): LocalDate {
+        return referenceDate.plusDays(option.daysOffset)
+    }
+
+    /**
+     * Dynamically calculates the ISO date string (YYYY-MM-DD) for Today, Yesterday, or
+     * Day Before Yesterday in the specified local ZoneId.
+     */
+    fun resolveQuickDateIso(
+        option: QuickDateOption,
+        nowMillis: Long = System.currentTimeMillis(),
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): String {
+        val todayLocal = epochMillisToLocalDate(nowMillis, zoneId)
+        return resolveQuickDate(option, todayLocal).format(isoDateFormatter)
+    }
+
+    /**
+     * Returns the matching QuickDateOption if selectedIsoDate equals Today, Yesterday,
+     * or Day Before Yesterday in the given local ZoneId, or null otherwise.
+     */
+    fun matchQuickDateOption(
+        selectedIsoDate: String?,
+        nowMillis: Long = System.currentTimeMillis(),
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): QuickDateOption? {
+        val selectedDate = parseIsoLocalDate(selectedIsoDate) ?: return null
+        val todayLocal = epochMillisToLocalDate(nowMillis, zoneId)
+        return QuickDateOption.entries.firstOrNull { option ->
+            resolveQuickDate(option, todayLocal) == selectedDate
+        }
+    }
+
+    /**
+     * Formats the currently selected ISO date into a clear Arabic display label
+     * (e.g., "اليوم (2026-11-08)" or "15 نوفمبر 2026 (2026-11-15)").
+     */
+    fun formatSelectedDateBannerText(
+        selectedIsoDate: String?,
+        nowMillis: Long = System.currentTimeMillis(),
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): String {
+        val parsed = parseIsoLocalDate(selectedIsoDate)
+            ?: return selectedIsoDate?.trim()?.takeIf { it.isNotEmpty() } ?: "غير محدد"
+        val normalizedIso = parsed.format(isoDateFormatter)
+        val matchedQuick = matchQuickDateOption(normalizedIso, nowMillis, zoneId)
+        return if (matchedQuick != null) {
+            "${matchedQuick.arabicLabel} ($normalizedIso)"
+        } else {
+            "${arabicDayMonthYearLabel(parsed)} ($normalizedIso)"
+        }
+    }
+
+    fun arabicMonthName(monthValue: Int): String {
+        return when (monthValue) {
+            1 -> "يناير"
+            2 -> "فبراير"
+            3 -> "مارس"
+            4 -> "أبريل"
+            5 -> "مايو"
+            6 -> "يونيو"
+            7 -> "يوليو"
+            8 -> "أغسطس"
+            9 -> "سبتمبر"
+            10 -> "أكتوبر"
+            11 -> "نوفمبر"
+            12 -> "ديسمبر"
+            else -> ""
+        }
+    }
+
+    fun arabicDayMonthYearLabel(date: LocalDate): String {
+        return "${date.dayOfMonth} ${arabicMonthName(date.monthValue)} ${date.year}"
+    }
+
+    fun arabicMonthYearTitle(yearMonth: YearMonth): String {
+        return "${arabicMonthName(yearMonth.monthValue)} ${yearMonth.year}"
+    }
+
+    val arabicWeekDaysShort: List<String> = listOf(
+        "سبت",
+        "أحد",
+        "اثنين",
+        "ثلاثاء",
+        "أربعاء",
+        "خميس",
+        "جمعة"
+    )
+
+    /**
+     * Builds a 7-column calendar grid for the given YearMonth starting on Saturday (السبت).
+     * Leading and trailing empty slots are represented as null.
+     * Automatically respects leap years (28 vs 29 days in February) and 30/31-day months.
+     */
+    fun buildCalendarMonthCells(yearMonth: YearMonth): List<LocalDate?> {
+        val firstDay = yearMonth.atDay(1)
+        // DayOfWeek ISO values: Mon=1 .. Fri=5, Sat=6, Sun=7.
+        // With Saturday as column 0: Sat(6)->0, Sun(7)->1, Mon(1)->2, ..., Fri(5)->6
+        val leadingEmptyCells = (firstDay.dayOfWeek.value + 1) % 7
+        val totalDays = yearMonth.lengthOfMonth()
+        val cells = ArrayList<LocalDate?>(leadingEmptyCells + totalDays + 7)
+        repeat(leadingEmptyCells) { cells.add(null) }
+        for (day in 1..totalDays) {
+            cells.add(yearMonth.atDay(day))
+        }
+        while (cells.size % 7 != 0) {
+            cells.add(null)
+        }
+        return cells
     }
 
     fun currentYearMonth(
@@ -227,6 +366,17 @@ object MoneyUtils {
         return try {
             YearMonth.parse(normalized, yearMonthFormatter)
                 .minusMonths(1)
+                .format(yearMonthFormatter)
+        } catch (e: Exception) {
+            yearMonth
+        }
+    }
+
+    fun nextYearMonth(yearMonth: String): String {
+        val normalized = normalizeDigits(yearMonth.trim())
+        return try {
+            YearMonth.parse(normalized, yearMonthFormatter)
+                .plusMonths(1)
                 .format(yearMonthFormatter)
         } catch (e: Exception) {
             yearMonth
