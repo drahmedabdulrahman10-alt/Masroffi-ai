@@ -21,6 +21,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Category
@@ -29,11 +31,9 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FitnessCenter
-import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.MedicalServices
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Payments
-import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Restaurant
 import androidx.compose.material.icons.filled.School
@@ -126,14 +126,14 @@ object CategoryIconHelper {
             "fitness_center" -> Icons.Default.FitnessCenter
             "checkroom" -> Icons.Default.Checkroom
             "movie" -> Icons.Default.Movie
-            "receipt_long" -> Icons.Default.ReceiptLong
+            "receipt_long" -> Icons.AutoMirrored.Filled.ReceiptLong
             "payments" -> Icons.Default.Payments
             "work" -> Icons.Default.Work
             "card_giftcard" -> Icons.Default.CardGiftcard
             "replay" -> Icons.Default.Replay
             "account_balance_wallet" -> Icons.Default.AccountBalanceWallet
             "category" -> Icons.Default.Category
-            else -> Icons.Default.HelpOutline
+            else -> Icons.AutoMirrored.Filled.HelpOutline
         }
     }
 }

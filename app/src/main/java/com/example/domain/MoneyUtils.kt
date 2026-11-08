@@ -4,15 +4,21 @@ import java.math.BigDecimal
 import java.math.RoundingMode
 import java.text.DecimalFormat
 import java.text.DecimalFormatSymbols
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.YearMonth
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.ResolverStyle
 import java.util.Locale
-import java.util.TimeZone
 
 /**
  * Exact monetary and date utilities for Masroofi AI.
  * Stores all monetary amounts in integer minor units (e.g., 100 piastres = 1.00 EGP).
+ * Standardizes all date/time conversions on thread-safe java.time (LocalDate, LocalDateTime,
+ * YearMonth, Instant, ZoneId, DateTimeFormatter) while preserving epoch-millisecond Room storage.
  */
 object MoneyUtils {
 
@@ -24,19 +30,13 @@ object MoneyUtils {
     )
     private val isoDateFormatRegex = Regex("""^\d{4}-\d{2}-\d{2}$""")
 
-    private val isoDateFormatterThreadLocal = object : ThreadLocal<SimpleDateFormat>() {
-        override fun initialValue(): SimpleDateFormat =
-            SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
-                isLenient = false
-            }
-    }
+    private val isoDateFormatter: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("uuuu-MM-dd", Locale.US)
+            .withResolverStyle(ResolverStyle.STRICT)
 
-    private val yearMonthFormatterThreadLocal = object : ThreadLocal<SimpleDateFormat>() {
-        override fun initialValue(): SimpleDateFormat =
-            SimpleDateFormat("yyyy-MM", Locale.US).apply {
-                isLenient = false
-            }
-    }
+    private val yearMonthFormatter: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("uuuu-MM", Locale.US)
+            .withResolverStyle(ResolverStyle.STRICT)
 
     private val majorNumberFormatterThreadLocal = object : ThreadLocal<DecimalFormat>() {
         override fun initialValue(): DecimalFormat =
@@ -157,98 +157,119 @@ object MoneyUtils {
         }
     }
 
-    fun todayIsoDate(nowMillis: Long = System.currentTimeMillis()): String {
-        val sdf = isoDateFormatterThreadLocal.get() ?: SimpleDateFormat("yyyy-MM-dd", Locale.US)
-        return sdf.format(Date(nowMillis))
+    fun todayIsoDate(
+        nowMillis: Long = System.currentTimeMillis(),
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): String {
+        return epochMillisToLocalDate(nowMillis, zoneId).format(isoDateFormatter)
     }
 
-    fun epochMillisToIsoDate(epochMillis: Long): String {
-        val sdf = isoDateFormatterThreadLocal.get() ?: SimpleDateFormat("yyyy-MM-dd", Locale.US)
-        return sdf.format(Date(epochMillis))
+    fun epochMillisToLocalDate(
+        epochMillis: Long,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): LocalDate {
+        return Instant.ofEpochMilli(epochMillis).atZone(zoneId).toLocalDate()
     }
 
-    fun formatArabicReadableDate(epochMillis: Long): String {
-        val sdf = isoDateFormatterThreadLocal.get() ?: SimpleDateFormat("yyyy-MM-dd", Locale.US)
-        return sdf.format(Date(epochMillis))
+    fun epochMillisToLocalDateTime(
+        epochMillis: Long,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): LocalDateTime {
+        return Instant.ofEpochMilli(epochMillis).atZone(zoneId).toLocalDateTime()
     }
 
-    fun isoDateToEpochMillis(isoDate: String?): Long? {
+    fun epochMillisToIsoDate(
+        epochMillis: Long,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): String {
+        return epochMillisToLocalDate(epochMillis, zoneId).format(isoDateFormatter)
+    }
+
+    fun formatArabicReadableDate(
+        epochMillis: Long,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): String {
+        return epochMillisToIsoDate(epochMillis, zoneId)
+    }
+
+    fun isoDateToEpochMillis(
+        isoDate: String?,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): Long? {
         if (isoDate.isNullOrBlank()) return null
         val normalized = normalizeDigits(isoDate.trim())
         if (!isoDateFormatRegex.matches(normalized)) return null
         return try {
-            val sdf = isoDateFormatterThreadLocal.get()
-                ?: SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { isLenient = false }
-            sdf.parse(normalized)?.time
+            val parsedDate = LocalDate.parse(normalized, isoDateFormatter)
+            parsedDate.atStartOfDay(zoneId).toInstant().toEpochMilli()
         } catch (e: Exception) {
             null
         }
     }
 
-    fun currentYearMonth(nowMillis: Long = System.currentTimeMillis()): String {
-        val sdf = yearMonthFormatterThreadLocal.get() ?: SimpleDateFormat("yyyy-MM", Locale.US)
-        return sdf.format(Date(nowMillis))
+    fun currentYearMonth(
+        nowMillis: Long = System.currentTimeMillis(),
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): String {
+        return yearMonthFromMillis(nowMillis, zoneId)
     }
 
-    fun yearMonthFromMillis(epochMillis: Long): String {
-        val sdf = yearMonthFormatterThreadLocal.get() ?: SimpleDateFormat("yyyy-MM", Locale.US)
-        return sdf.format(Date(epochMillis))
+    fun yearMonthFromMillis(
+        epochMillis: Long,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): String {
+        val localDate = epochMillisToLocalDate(epochMillis, zoneId)
+        return YearMonth.from(localDate).format(yearMonthFormatter)
     }
 
     fun previousYearMonth(yearMonth: String): String {
-        val parts = yearMonth.split("-")
-        if (parts.size != 2) return yearMonth
-        val year = parts[0].toIntOrNull() ?: return yearMonth
-        val month = parts[1].toIntOrNull() ?: return yearMonth
-        return if (month == 1) {
-            String.format(Locale.US, "%04d-12", year - 1)
-        } else {
-            String.format(Locale.US, "%04d-%02d", year, month - 1)
+        val normalized = normalizeDigits(yearMonth.trim())
+        return try {
+            YearMonth.parse(normalized, yearMonthFormatter)
+                .minusMonths(1)
+                .format(yearMonthFormatter)
+        } catch (e: Exception) {
+            yearMonth
         }
     }
 
-    fun startOfDayMillis(epochMillis: Long): Long {
-        val cal = Calendar.getInstance().apply {
-            timeInMillis = epochMillis
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-        }
-        return cal.timeInMillis
+    fun startOfDayMillis(
+        epochMillis: Long,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): Long {
+        val localDate = epochMillisToLocalDate(epochMillis, zoneId)
+        return localDate.atStartOfDay(zoneId).toInstant().toEpochMilli()
     }
 
-    fun endOfDayMillis(epochMillis: Long): Long {
-        val cal = Calendar.getInstance().apply {
-            timeInMillis = epochMillis
-            set(Calendar.HOUR_OF_DAY, 23)
-            set(Calendar.MINUTE, 59)
-            set(Calendar.SECOND, 59)
-            set(Calendar.MILLISECOND, 999)
-        }
-        return cal.timeInMillis
+    fun endOfDayMillis(
+        epochMillis: Long,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): Long {
+        val localDate = epochMillisToLocalDate(epochMillis, zoneId)
+        return LocalDateTime.of(localDate, LocalTime.of(23, 59, 59, 999_000_000))
+            .atZone(zoneId)
+            .toInstant()
+            .toEpochMilli()
     }
 
-    fun monthDateRange(yearMonth: String): Pair<Long, Long> {
-        val parts = yearMonth.split("-")
-        val year = parts.getOrNull(0)?.toIntOrNull() ?: 2026
-        val month = (parts.getOrNull(1)?.toIntOrNull() ?: 1) - 1
-        val startCal = Calendar.getInstance().apply {
-            set(Calendar.YEAR, year)
-            set(Calendar.MONTH, month)
-            set(Calendar.DAY_OF_MONTH, 1)
-            set(Calendar.HOUR_OF_DAY, 0)
-            set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
+    fun monthDateRange(
+        yearMonth: String,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): Pair<Long, Long> {
+        val normalized = normalizeDigits(yearMonth.trim())
+        val ym = try {
+            YearMonth.parse(normalized, yearMonthFormatter)
+        } catch (e: Exception) {
+            val parts = normalized.split("-")
+            val year = parts.getOrNull(0)?.toIntOrNull() ?: 2026
+            val month = (parts.getOrNull(1)?.toIntOrNull() ?: 1).coerceIn(1, 12)
+            YearMonth.of(year, month)
         }
-        val endCal = (startCal.clone() as Calendar).apply {
-            set(Calendar.DAY_OF_MONTH, getActualMaximum(Calendar.DAY_OF_MONTH))
-            set(Calendar.HOUR_OF_DAY, 23)
-            set(Calendar.MINUTE, 59)
-            set(Calendar.SECOND, 59)
-            set(Calendar.MILLISECOND, 999)
-        }
-        return startCal.timeInMillis to endCal.timeInMillis
+        val startMillis = ym.atDay(1).atStartOfDay(zoneId).toInstant().toEpochMilli()
+        val endMillis = LocalDateTime.of(ym.atEndOfMonth(), LocalTime.of(23, 59, 59, 999_000_000))
+            .atZone(zoneId)
+            .toInstant()
+            .toEpochMilli()
+        return startMillis to endMillis
     }
 }

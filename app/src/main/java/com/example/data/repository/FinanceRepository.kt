@@ -11,8 +11,9 @@ import com.example.data.local.TransactionEntity
 import com.example.data.local.TransactionSource
 import com.example.data.local.TransactionType
 import com.example.data.preferences.AiProviderType
+import com.example.data.preferences.ApiKeyStatus
 import com.example.data.preferences.AppPreferencesRepository
-import com.example.data.preferences.SecureKeyStorage
+import com.example.data.preferences.AppPreferencesState
 import com.example.domain.ai.AiParseResult
 import com.example.domain.ai.AiProviderClient
 import com.example.domain.ai.AiServiceException
@@ -48,6 +49,19 @@ class FinanceRepository(
     val allTransactionsFlow: Flow<List<TransactionEntity>> = dao.observeAllTransactions()
     val allBudgetsFlow: Flow<List<BudgetEntity>> = dao.observeAllBudgets()
     val categoryRulesFlow: Flow<List<CategoryRuleEntity>> = dao.observeCategoryRules()
+    val preferencesFlow: Flow<AppPreferencesState> = preferencesRepository.preferencesFlow
+
+    fun observeApiKeyStatus(): Flow<ApiKeyStatus> =
+        preferencesRepository.observeApiKeyStatus(ioDispatcher)
+
+    suspend fun getProviderApiKey(provider: AiProviderType): String =
+        preferencesRepository.getProviderApiKey(provider, ioDispatcher)
+
+    suspend fun saveProviderApiKey(provider: AiProviderType, rawKey: String): Result<Unit> =
+        preferencesRepository.saveProviderApiKey(provider, rawKey, ioDispatcher)
+
+    suspend fun removeProviderApiKey(provider: AiProviderType) =
+        preferencesRepository.removeProviderApiKey(provider, ioDispatcher)
 
     private var lastManualSaveSignature: String? = null
     private var lastManualSaveTimestamp: Long = 0L
@@ -360,11 +374,7 @@ class FinanceRepository(
             val categories = dao.getActiveCategories()
             val rules = dao.getAllCategoryRules()
             val key = if (snapshot.aiEnabled && !useLocalParserOnly) {
-                val keyId = when (snapshot.selectedProvider) {
-                    AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
-                    AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
-                }
-                preferencesRepository.secureKeyStorage.getApiKey(keyId).trim()
+                preferencesRepository.getProviderApiKey(snapshot.selectedProvider, ioDispatcher)
             } else {
                 ""
             }
@@ -462,11 +472,7 @@ class FinanceRepository(
         if (!prefs.aiEnabled || !prefs.aiSummaryEnabled) {
             return@withContext Result.failure(IllegalStateException("ميزة الملخص الذكي غير مفعلة في الإعدادات."))
         }
-        val keyId = when (prefs.selectedProvider) {
-            AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
-            AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
-        }
-        val apiKey = preferencesRepository.secureKeyStorage.getApiKey(keyId).trim()
+        val apiKey = preferencesRepository.getProviderApiKey(prefs.selectedProvider, ioDispatcher)
         val modelId = when (prefs.selectedProvider) {
             AiProviderType.GEMINI -> prefs.geminiModelId
             AiProviderType.OPENROUTER -> prefs.openRouterModelId

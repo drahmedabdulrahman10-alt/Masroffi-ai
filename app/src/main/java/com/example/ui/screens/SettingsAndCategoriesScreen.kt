@@ -85,12 +85,12 @@ import com.example.data.preferences.ThemePreference
 import com.example.data.repository.RestoreMode
 import com.example.domain.MoneyUtils
 import com.example.ui.components.CategoryIconHelper
-import com.example.ui.viewmodel.MasroofiUiState
+import com.example.ui.viewmodel.SettingsUiState
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsAndCategoriesScreen(
-    uiState: MasroofiUiState,
+    uiState: SettingsUiState,
     onUpdateCurrency: (String) -> Unit,
     onUpdateTheme: (ThemePreference) -> Unit,
     onUpdateRefundMode: (RefundAccountingMode) -> Unit = {},

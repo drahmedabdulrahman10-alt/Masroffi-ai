@@ -33,14 +33,21 @@ import com.example.data.preferences.KeyCipherEngine
 import com.example.data.preferences.SecureKeyStorage
 import com.example.data.repository.FinanceRepository
 import com.example.data.repository.RestoreMode
+import com.example.di.AppContainer
 import com.example.domain.ai.AiProviderClient
 import com.example.domain.ai.AiServiceException
 import com.example.domain.ai.ProposedTransactionDraft
 import com.example.ui.MasroofiApp
 import com.example.ui.speech.MasroofiSpeechHelper
 import com.example.ui.speech.SpeechRecognitionState
-import com.example.ui.viewmodel.MasroofiViewModel
+import com.example.ui.viewmodel.AiEntryViewModel
+import com.example.ui.viewmodel.HomeViewModel
+import com.example.ui.viewmodel.ReportPeriodFilter
+import com.example.ui.viewmodel.ReportsViewModel
+import com.example.ui.viewmodel.SettingsViewModel
+import com.example.ui.viewmodel.SnackbarManager
 import com.example.ui.viewmodel.TransactionHistoryFilter
+import com.example.ui.viewmodel.TransactionsViewModel
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -48,7 +55,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
@@ -56,6 +62,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -93,7 +100,7 @@ class ExampleRobolectricTest {
         database = Room.inMemoryDatabaseBuilder(context, MasroofiDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        dataStoreScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        dataStoreScope = CoroutineScope(Dispatchers.IO.limitedParallelism(1) + SupervisorJob())
         val testDataStore = PreferenceDataStoreFactory.create(
             scope = dataStoreScope,
             produceFile = { File(context.cacheDir, "test_prefs_${UUID.randomUUID()}.preferences_pb") }
@@ -132,21 +139,18 @@ class ExampleRobolectricTest {
         assertTrue("Condition was not satisfied within ${timeoutMs}ms", predicate())
     }
 
-    private fun createTestViewModel(
+    private fun createTestAppContainer(
         defaultDispatcher: CoroutineDispatcher = Dispatchers.Default,
         ioDispatcher: CoroutineDispatcher = Dispatchers.IO
-    ): MasroofiViewModel {
-        val factory = object : ViewModelProvider.Factory {
-            @Suppress("UNCHECKED_CAST")
-            override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                return MasroofiViewModel(
-                    repository = repository,
-                    defaultDispatcher = defaultDispatcher,
-                    ioDispatcher = ioDispatcher
-                ) as T
-            }
-        }
-        return ViewModelProvider(viewModelStore, factory)[MasroofiViewModel::class.java]
+    ): AppContainer {
+        return AppContainer(
+            database = database,
+            preferencesRepository = prefsRepository,
+            financeRepository = repository,
+            snackbarManager = SnackbarManager(),
+            defaultDispatcher = defaultDispatcher,
+            ioDispatcher = ioDispatcher
+        )
     }
 
     @Test
@@ -253,12 +257,24 @@ class ExampleRobolectricTest {
 
     @Test
     fun `RTL Compose UI renders Home dashboard, navigates tabs, and parses AI multi-transactions`() {
-        val viewModel = createTestViewModel(
+        val container = createTestAppContainer(
             defaultDispatcher = Dispatchers.Main,
             ioDispatcher = Dispatchers.Main
         )
+        val homeVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[HomeViewModel::class.java]
+        val transactionsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[TransactionsViewModel::class.java]
+        val aiEntryVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[AiEntryViewModel::class.java]
+        val reportsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[ReportsViewModel::class.java]
+        val settingsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[SettingsViewModel::class.java]
+
         composeTestRule.setContent {
-            MasroofiApp(viewModel = viewModel)
+            MasroofiApp(
+                homeViewModel = homeVm,
+                transactionsViewModel = transactionsVm,
+                aiEntryViewModel = aiEntryVm,
+                reportsViewModel = reportsVm,
+                settingsViewModel = settingsVm
+            )
         }
         composeTestRule.waitForIdle()
 
@@ -419,10 +435,11 @@ class ExampleRobolectricTest {
 
     @Test
     fun `ViewModel executes backup, restore, CSV export, and user notifications safely (REV-02, REV-04, REV-09)`() {
-        val viewModel = createTestViewModel(
+        val container = createTestAppContainer(
             defaultDispatcher = Dispatchers.Main,
             ioDispatcher = Dispatchers.Main
         )
+        val viewModel = ViewModelProvider(viewModelStore, container.viewModelFactory)[SettingsViewModel::class.java]
         composeTestRule.waitForIdle()
 
         // Test user notification delivery (REV-02)
@@ -522,11 +539,12 @@ class ExampleRobolectricTest {
             createdUsd to createdSar
         }
 
-        // 2. Edit the USD transaction through MasroofiViewModel while app default is EGP
-        val viewModel = createTestViewModel(
+        // 2. Edit the USD transaction through TransactionsViewModel while app default is EGP
+        val container = createTestAppContainer(
             defaultDispatcher = Dispatchers.Main,
             ioDispatcher = Dispatchers.Main
         )
+        val viewModel = ViewModelProvider(viewModelStore, container.viewModelFactory)[TransactionsViewModel::class.java]
         awaitMainLooperCondition {
             viewModel.uiState.value.allTransactions.size == 2
         }
@@ -667,10 +685,11 @@ class ExampleRobolectricTest {
             ).getOrThrow()
         }
 
-        val viewModel = createTestViewModel(
+        val container = createTestAppContainer(
             defaultDispatcher = Dispatchers.Main,
             ioDispatcher = Dispatchers.Main
         )
+        val viewModel = ViewModelProvider(viewModelStore, container.viewModelFactory)[TransactionsViewModel::class.java]
         awaitMainLooperCondition {
             viewModel.uiState.value.allTransactions.size == 2
         }
@@ -860,5 +879,75 @@ class ExampleRobolectricTest {
         assertEquals("معاملة أصلية محمية", remainingTxs[0].description)
         assertEquals(75_000L, remainingTxs[0].amountMinorUnits)
         assertEquals(originalCategoriesCount, database.dao().getAllCategories().size)
+    }
+
+    @Test
+    fun `feature-scoped ViewModels share a single AppContainer repository and maintain isolated screen states`() {
+        val container = createTestAppContainer(
+            defaultDispatcher = Dispatchers.Main,
+            ioDispatcher = Dispatchers.Main
+        )
+        assertSame(repository, container.financeRepository)
+        assertSame(prefsRepository, container.preferencesRepository)
+
+        val homeVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[HomeViewModel::class.java]
+        val transactionsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[TransactionsViewModel::class.java]
+        val aiEntryVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[AiEntryViewModel::class.java]
+        val reportsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[ReportsViewModel::class.java]
+        val settingsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[SettingsViewModel::class.java]
+
+        awaitMainLooperCondition {
+            homeVm.uiState.value.categories.isNotEmpty() &&
+                settingsVm.uiState.value.categories.isNotEmpty()
+        }
+
+        // 1. HomeViewModel updates opening balance and month selection
+        homeVm.setHomeYearMonth("2026-11")
+        homeVm.saveOpeningBalance("1500")
+        awaitMainLooperCondition {
+            homeVm.uiState.value.preferences.openingBalanceMinorUnits == 150_000L
+        }
+        assertEquals("2026-11", homeVm.uiState.value.selectedHomeYearMonth)
+        assertEquals(150_000L, settingsVm.uiState.value.preferences.openingBalanceMinorUnits)
+
+        // 2. TransactionsViewModel saves a manual transaction and updates Home & Reports automatically via Room Flow
+        transactionsVm.saveManualTransaction(
+            description = "غداء عمل",
+            amountText = "200",
+            type = TransactionType.EXPENSE,
+            categoryId = DefaultCategories.CAT_FOOD,
+            isoDate = "2026-11-05",
+            notes = ""
+        )
+        awaitMainLooperCondition {
+            homeVm.uiState.value.allTransactions.size == 1 &&
+                homeVm.uiState.value.homeSummary.currentBalanceMinor == 130_000L
+        }
+        assertEquals(130_000L, homeVm.uiState.value.homeSummary.currentBalanceMinor)
+
+        // 3. ReportsViewModel updates custom period filter & drilldown independently
+        reportsVm.setReportPeriodFilter(
+            filter = ReportPeriodFilter.CUSTOM,
+            customStartIso = "2026-11-01",
+            customEndIso = "2026-11-30"
+        )
+        awaitMainLooperCondition {
+            reportsVm.uiState.value.reportPeriodFilter == ReportPeriodFilter.CUSTOM &&
+                reportsVm.uiState.value.reportSummary.periodExpenseMinor == 20_000L
+        }
+        reportsVm.selectReportCategoryDrilldown(DefaultCategories.CAT_FOOD)
+        awaitMainLooperCondition {
+            reportsVm.uiState.value.selectedReportDrilldownCategoryId == DefaultCategories.CAT_FOOD
+        }
+        assertEquals(DefaultCategories.CAT_FOOD, reportsVm.uiState.value.selectedReportDrilldownCategoryId)
+
+        // 4. AiEntryViewModel parses multi-transactions and updates its isolated draft state
+        aiEntryVm.updateAiInputText("اشتريت قهوة بـ 30 جنيه")
+        aiEntryVm.analyzeAiInput(useLocalParserOnly = true)
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult != null
+        }
+        assertEquals(1, aiEntryVm.uiState.value.aiParseResult?.proposals?.size)
+        assertEquals(3000L, aiEntryVm.uiState.value.aiParseResult?.proposals?.first()?.amountMinorUnits)
     }
 }

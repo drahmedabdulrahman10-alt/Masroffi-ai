@@ -10,13 +10,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ReceiptLong
+import androidx.compose.material.icons.automirrored.outlined.ReceiptLong
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.ReceiptLong
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -52,7 +52,11 @@ import com.example.ui.screens.ReportsScreen
 import com.example.ui.screens.SettingsAndCategoriesScreen
 import com.example.ui.screens.TransactionsScreen
 import com.example.ui.theme.MasroofiTheme
-import com.example.ui.viewmodel.MasroofiViewModel
+import com.example.ui.viewmodel.AiEntryViewModel
+import com.example.ui.viewmodel.HomeViewModel
+import com.example.ui.viewmodel.ReportsViewModel
+import com.example.ui.viewmodel.SettingsViewModel
+import com.example.ui.viewmodel.TransactionsViewModel
 
 enum class MasroofiDestination(
     val route: String,
@@ -71,8 +75,8 @@ enum class MasroofiDestination(
     TRANSACTIONS(
         route = "transactions",
         arabicTitle = "المعاملات",
-        selectedIcon = Icons.Filled.ReceiptLong,
-        unselectedIcon = Icons.Outlined.ReceiptLong,
+        selectedIcon = Icons.AutoMirrored.Filled.ReceiptLong,
+        unselectedIcon = Icons.AutoMirrored.Outlined.ReceiptLong,
         testTag = "nav_tab_transactions"
     ),
     REPORTS(
@@ -93,12 +97,21 @@ enum class MasroofiDestination(
 
 @Composable
 fun MasroofiApp(
-    viewModel: MasroofiViewModel
+    homeViewModel: HomeViewModel,
+    transactionsViewModel: TransactionsViewModel,
+    aiEntryViewModel: AiEntryViewModel,
+    reportsViewModel: ReportsViewModel,
+    settingsViewModel: SettingsViewModel
 ) {
     val context = LocalContext.current
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val homeUiState by homeViewModel.uiState.collectAsStateWithLifecycle()
+    val transactionsUiState by transactionsViewModel.uiState.collectAsStateWithLifecycle()
+    val aiEntryUiState by aiEntryViewModel.uiState.collectAsStateWithLifecycle()
+    val reportsUiState by reportsViewModel.uiState.collectAsStateWithLifecycle()
+    val settingsUiState by settingsViewModel.uiState.collectAsStateWithLifecycle()
+
     val systemDark = isSystemInDarkTheme()
-    val isDark = when (uiState.preferences.themePreference) {
+    val isDark = when (homeUiState.preferences.themePreference) {
         ThemePreference.SYSTEM -> systemDark
         ThemePreference.LIGHT -> false
         ThemePreference.DARK -> true
@@ -114,12 +127,21 @@ fun MasroofiApp(
         var transactionPendingDelete by remember { mutableStateOf<TransactionEntity?>(null) }
 
         val snackbarHostState = remember { SnackbarHostState() }
+        val activeSnackbarMessage = homeUiState.snackbarMessage
+            ?: transactionsUiState.snackbarMessage
+            ?: aiEntryUiState.snackbarMessage
+            ?: reportsUiState.snackbarMessage
+            ?: settingsUiState.snackbarMessage
 
-        LaunchedEffect(uiState.snackbarMessage) {
-            val msg = uiState.snackbarMessage
+        LaunchedEffect(activeSnackbarMessage) {
+            val msg = activeSnackbarMessage
             if (!msg.isNullOrBlank()) {
                 snackbarHostState.showSnackbar(msg)
-                viewModel.clearSnackbar()
+                homeViewModel.clearSnackbar()
+                transactionsViewModel.clearSnackbar()
+                aiEntryViewModel.clearSnackbar()
+                reportsViewModel.clearSnackbar()
+                settingsViewModel.clearSnackbar()
             }
         }
 
@@ -131,16 +153,16 @@ fun MasroofiApp(
 
         if (showAiEntryScreen) {
             AiEntrySheetScreen(
-                uiState = uiState,
+                uiState = aiEntryUiState,
                 onClose = { showAiEntryScreen = false },
-                onUpdateInputText = viewModel::updateAiInputText,
-                onAppendSpeechText = viewModel::appendRecognizedSpeech,
-                onAnalyzeInput = viewModel::analyzeAiInput,
-                onUpdateDraft = viewModel::updateProposedDraft,
-                onRemoveDraft = viewModel::removeProposedDraft,
-                onCancelReview = viewModel::cancelAiReview,
+                onUpdateInputText = aiEntryViewModel::updateAiInputText,
+                onAppendSpeechText = aiEntryViewModel::appendRecognizedSpeech,
+                onAnalyzeInput = aiEntryViewModel::analyzeAiInput,
+                onUpdateDraft = aiEntryViewModel::updateProposedDraft,
+                onRemoveDraft = aiEntryViewModel::removeProposedDraft,
+                onCancelReview = aiEntryViewModel::cancelAiReview,
                 onSaveAllReviewed = {
-                    viewModel.saveAllReviewedProposals(
+                    aiEntryViewModel.saveAllReviewedProposals(
                         onSavedSuccess = { showAiEntryScreen = false }
                     )
                 }
@@ -203,7 +225,7 @@ fun MasroofiApp(
                             when (currentDestination) {
                                 MasroofiDestination.HOME -> {
                                     HomeScreen(
-                                        uiState = uiState,
+                                        uiState = homeUiState,
                                         onOpenManualEntry = { type ->
                                             editingTransaction = null
                                             manualDialogInitialType = type
@@ -220,23 +242,23 @@ fun MasroofiApp(
                                         onDeleteTransaction = { tx ->
                                             transactionPendingDelete = tx
                                         },
-                                        onSaveOpeningBalance = viewModel::saveOpeningBalance,
+                                        onSaveOpeningBalance = homeViewModel::saveOpeningBalance,
                                         onSaveMonthlyBudget = { amount ->
-                                            viewModel.saveMonthlyBudget(
-                                                yearMonth = uiState.selectedHomeYearMonth,
+                                            homeViewModel.saveMonthlyBudget(
+                                                yearMonth = homeUiState.selectedHomeYearMonth,
                                                 categoryId = null,
                                                 amountText = amount
                                             )
                                         },
-                                        onChangeMonth = viewModel::setHomeYearMonth
+                                        onChangeMonth = homeViewModel::setHomeYearMonth
                                     )
                                 }
 
                                 MasroofiDestination.TRANSACTIONS -> {
                                     TransactionsScreen(
-                                        uiState = uiState,
-                                        onUpdateFilter = viewModel::updateHistoryFilter,
-                                        onClearFilters = viewModel::clearHistoryFilters,
+                                        uiState = transactionsUiState,
+                                        onUpdateFilter = transactionsViewModel::updateHistoryFilter,
+                                        onClearFilters = transactionsViewModel::clearHistoryFilters,
                                         onOpenManualEntry = { type ->
                                             editingTransaction = null
                                             manualDialogInitialType = type
@@ -256,10 +278,10 @@ fun MasroofiApp(
 
                                 MasroofiDestination.REPORTS -> {
                                     ReportsScreen(
-                                        uiState = uiState,
-                                        onSelectPeriodFilter = viewModel::setReportPeriodFilter,
-                                        onSelectCategoryDrilldown = viewModel::selectReportCategoryDrilldown,
-                                        onRequestSmartSummary = viewModel::generateSmartSummaryForCurrentReport,
+                                        uiState = reportsUiState,
+                                        onSelectPeriodFilter = reportsViewModel::setReportPeriodFilter,
+                                        onSelectCategoryDrilldown = reportsViewModel::selectReportCategoryDrilldown,
+                                        onRequestSmartSummary = reportsViewModel::generateSmartSummaryForCurrentReport,
                                         onEditTransaction = { tx ->
                                             editingTransaction = tx
                                             manualDialogInitialType = tx.type
@@ -273,34 +295,34 @@ fun MasroofiApp(
 
                                 MasroofiDestination.SETTINGS -> {
                                     SettingsAndCategoriesScreen(
-                                        uiState = uiState,
-                                        onUpdateCurrency = viewModel::updateCurrency,
-                                        onUpdateTheme = viewModel::updateThemePreference,
-                                        onUpdateRefundMode = viewModel::updateRefundAccountingMode,
-                                        onSaveOpeningBalance = viewModel::saveOpeningBalance,
-                                        onSaveMonthlyBudget = viewModel::saveMonthlyBudget,
-                                        onDeleteBudget = viewModel::deleteBudget,
-                                        onSaveCategory = viewModel::saveCategory,
-                                        onToggleArchiveCategory = viewModel::toggleCategoryArchive,
-                                        onDeleteCategory = viewModel::deleteCategory,
-                                        onSaveAiSettings = viewModel::saveAiSettings,
-                                        onRemoveApiKey = viewModel::removeApiKey,
-                                        onTestAiConnection = viewModel::testAiConnection,
-                                        onCreateBackupJson = { viewModel.createBackupJsonString() },
-                                        onValidateRestoreJson = viewModel::validateBackupFileContent,
-                                        onDismissBackupPreview = viewModel::dismissBackupPreview,
-                                        onConfirmRestoreBackup = viewModel::confirmRestoreBackup,
-                                        onExportCsv = { viewModel.exportCsvString() },
+                                        uiState = settingsUiState,
+                                        onUpdateCurrency = settingsViewModel::updateCurrency,
+                                        onUpdateTheme = settingsViewModel::updateThemePreference,
+                                        onUpdateRefundMode = settingsViewModel::updateRefundAccountingMode,
+                                        onSaveOpeningBalance = settingsViewModel::saveOpeningBalance,
+                                        onSaveMonthlyBudget = settingsViewModel::saveMonthlyBudget,
+                                        onDeleteBudget = settingsViewModel::deleteBudget,
+                                        onSaveCategory = settingsViewModel::saveCategory,
+                                        onToggleArchiveCategory = settingsViewModel::toggleCategoryArchive,
+                                        onDeleteCategory = settingsViewModel::deleteCategory,
+                                        onSaveAiSettings = settingsViewModel::saveAiSettings,
+                                        onRemoveApiKey = settingsViewModel::removeApiKey,
+                                        onTestAiConnection = settingsViewModel::testAiConnection,
+                                        onCreateBackupJson = { settingsViewModel.createBackupJsonString() },
+                                        onValidateRestoreJson = settingsViewModel::validateBackupFileContent,
+                                        onDismissBackupPreview = settingsViewModel::dismissBackupPreview,
+                                        onConfirmRestoreBackup = settingsViewModel::confirmRestoreBackup,
+                                        onExportCsv = { settingsViewModel.exportCsvString() },
                                         onExportBackupToUri = { uri ->
-                                            viewModel.exportBackupToUri(context.contentResolver, uri)
+                                            settingsViewModel.exportBackupToUri(context.contentResolver, uri)
                                         },
                                         onImportBackupFromUri = { uri ->
-                                            viewModel.importBackupFromUri(context.contentResolver, uri)
+                                            settingsViewModel.importBackupFromUri(context.contentResolver, uri)
                                         },
                                         onExportCsvToUri = { uri ->
-                                            viewModel.exportCsvToUri(context.contentResolver, uri)
+                                            settingsViewModel.exportCsvToUri(context.contentResolver, uri)
                                         },
-                                        onShowMessage = viewModel::showUserMessage
+                                        onShowMessage = settingsViewModel::showUserMessage
                                     )
                                 }
                             }
@@ -313,18 +335,18 @@ fun MasroofiApp(
         if (showManualDialog) {
             val activeCurrencySymbol = editingTransaction?.let {
                 SupportedCurrencies.fromCode(it.currencyCode).symbol
-            } ?: uiState.preferences.currencySymbol
+            } ?: transactionsUiState.preferences.currencySymbol
             ManualTransactionDialog(
                 initialType = manualDialogInitialType,
                 existingTransaction = editingTransaction,
-                categories = uiState.categories,
+                categories = transactionsUiState.categories,
                 currencySymbol = activeCurrencySymbol,
                 onDismiss = {
                     showManualDialog = false
                     editingTransaction = null
                 },
                 onSave = { existingId, desc, amount, type, catId, isoDate, notes, isRefundOffset ->
-                    viewModel.saveManualTransaction(
+                    transactionsViewModel.saveManualTransaction(
                         existingId = existingId,
                         description = desc,
                         amountText = amount,
@@ -348,7 +370,7 @@ fun MasroofiApp(
                 title = "حذف المعاملة",
                 message = "هل أنت متأكد من حذف معاملة (${tx.description})؟ سيتم تحديث الرصيد والتقارير فوراً.",
                 onConfirm = {
-                    viewModel.deleteTransaction(tx.id)
+                    transactionsViewModel.deleteTransaction(tx.id)
                     transactionPendingDelete = null
                 },
                 onDismiss = { transactionPendingDelete = null }

@@ -53,13 +53,13 @@ import com.example.ui.theme.DangerRedLight
 import com.example.ui.theme.ExpenseRedLight
 import com.example.ui.theme.IncomeGreenLight
 import com.example.ui.theme.WarningAmberLight
-import com.example.ui.viewmodel.MasroofiUiState
 import com.example.ui.viewmodel.ReportPeriodFilter
+import com.example.ui.viewmodel.ReportsUiState
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ReportsScreen(
-    uiState: MasroofiUiState,
+    uiState: ReportsUiState,
     onSelectPeriodFilter: (ReportPeriodFilter, String, String) -> Unit,
     onSelectCategoryDrilldown: (String?) -> Unit,
     onRequestSmartSummary: () -> Unit,

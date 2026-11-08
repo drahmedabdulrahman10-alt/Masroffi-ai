@@ -10,9 +10,15 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.data.local.RefundAccountingMode
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withContext
 
 private val Context.masroofiDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "masroofi_preferences"
@@ -69,11 +75,19 @@ data class AppPreferencesState(
     val categoriesSeeded: Boolean = false
 )
 
+data class ApiKeyStatus(
+    val maskedGeminiKey: String = "غير مُعد",
+    val maskedOpenRouterKey: String = "غير مُعد",
+    val hasGeminiKey: Boolean = false,
+    val hasOpenRouterKey: Boolean = false
+)
+
 class AppPreferencesRepository(
     private val context: Context,
-    val secureKeyStorage: SecureKeyStorage = SecureKeyStorage(context.applicationContext),
+    private val secureKeyStorage: SecureKeyStorage = SecureKeyStorage(context.applicationContext),
     private val dataStore: DataStore<Preferences> = context.applicationContext.masroofiDataStore
 ) {
+    private val keyRefreshTrigger = MutableStateFlow(0)
 
     private object Keys {
         val CURRENCY_CODE = stringPreferencesKey("currency_code")
@@ -285,5 +299,57 @@ class AppPreferencesRepository(
             prefs[Keys.REFUND_MODE] = refundMode.name
             prefs[Keys.CATEGORIES_SEEDED] = true
         }
+    }
+
+    fun observeApiKeyStatus(ioDispatcher: CoroutineDispatcher = Dispatchers.IO): Flow<ApiKeyStatus> {
+        return keyRefreshTrigger.map {
+            val geminiRaw = secureKeyStorage.getApiKey(SecureKeyStorage.KEY_GEMINI_API)
+            val openRouterRaw = secureKeyStorage.getApiKey(SecureKeyStorage.KEY_OPENROUTER_API)
+            ApiKeyStatus(
+                maskedGeminiKey = secureKeyStorage.maskApiKey(geminiRaw),
+                maskedOpenRouterKey = secureKeyStorage.maskApiKey(openRouterRaw),
+                hasGeminiKey = geminiRaw.isNotBlank(),
+                hasOpenRouterKey = openRouterRaw.isNotBlank()
+            )
+        }.flowOn(ioDispatcher)
+    }
+
+    suspend fun getProviderApiKey(
+        provider: AiProviderType,
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): String = withContext(ioDispatcher) {
+        val keyId = when (provider) {
+            AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
+            AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
+        }
+        secureKeyStorage.getApiKey(keyId).trim()
+    }
+
+    suspend fun saveProviderApiKey(
+        provider: AiProviderType,
+        rawKey: String,
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    ): Result<Unit> = withContext(ioDispatcher) {
+        val keyId = when (provider) {
+            AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
+            AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
+        }
+        val result = secureKeyStorage.saveApiKey(keyId, rawKey)
+        if (result.isSuccess) {
+            keyRefreshTrigger.update { it + 1 }
+        }
+        result
+    }
+
+    suspend fun removeProviderApiKey(
+        provider: AiProviderType,
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    ) = withContext(ioDispatcher) {
+        val keyId = when (provider) {
+            AiProviderType.GEMINI -> SecureKeyStorage.KEY_GEMINI_API
+            AiProviderType.OPENROUTER -> SecureKeyStorage.KEY_OPENROUTER_API
+        }
+        secureKeyStorage.removeApiKey(keyId)
+        keyRefreshTrigger.update { it + 1 }
     }
 }

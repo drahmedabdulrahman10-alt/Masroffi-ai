@@ -80,12 +80,12 @@ import com.example.ui.speech.SpeechRecognitionState
 import com.example.ui.theme.ExpenseRedLight
 import com.example.ui.theme.IncomeGreenLight
 import com.example.ui.theme.WarningAmberLight
-import com.example.ui.viewmodel.MasroofiUiState
+import com.example.ui.viewmodel.AiEntryUiState
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AiEntrySheetScreen(
-    uiState: MasroofiUiState,
+    uiState: AiEntryUiState,
     onClose: () -> Unit,
     onUpdateInputText: (String) -> Unit,
     onAppendSpeechText: (String) -> Unit,

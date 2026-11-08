@@ -51,13 +51,13 @@ import com.example.data.local.TransactionType
 import com.example.data.preferences.SupportedCurrencies
 import com.example.domain.MoneyUtils
 import com.example.ui.components.TransactionItemCard
-import com.example.ui.viewmodel.MasroofiUiState
 import com.example.ui.viewmodel.TransactionHistoryFilter
+import com.example.ui.viewmodel.TransactionsUiState
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TransactionsScreen(
-    uiState: MasroofiUiState,
+    uiState: TransactionsUiState,
     onUpdateFilter: (TransactionHistoryFilter) -> Unit,
     onClearFilters: () -> Unit,
     onOpenManualEntry: (TransactionType) -> Unit,

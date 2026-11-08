@@ -71,11 +71,11 @@ import com.example.ui.theme.EmeraldPrimaryLight
 import com.example.ui.theme.ExpenseRedLight
 import com.example.ui.theme.IncomeGreenLight
 import com.example.ui.theme.WarningAmberLight
-import com.example.ui.viewmodel.MasroofiUiState
+import com.example.ui.viewmodel.HomeUiState
 
 @Composable
 fun HomeScreen(
-    uiState: MasroofiUiState,
+    uiState: HomeUiState,
     onOpenManualEntry: (TransactionType) -> Unit,
     onOpenAiEntry: () -> Unit,
     onOpenReports: () -> Unit,

@@ -13,6 +13,7 @@ import com.example.domain.FinancialCalculator
 import com.example.domain.MoneyUtils
 import com.example.domain.ai.EgyptianArabicLocalParser
 import com.example.domain.ai.RemoteAiProviderClient
+import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -815,5 +816,43 @@ class ExampleUnitTest {
         """.trimIndent()
         val invalidCurrPreview = BackupExportManager.validateAndPreviewBackupJson(unsupportedCurrencyJson)
         assertFalse(invalidCurrPreview.isValid)
+    }
+
+    @Test
+    fun `java time date utilities in MoneyUtils strictly validate calendar dates and compute exact month boundaries`() {
+        val cairoZone = ZoneId.of("Africa/Cairo")
+        val millis = MoneyUtils.isoDateToEpochMillis("2026-11-15", cairoZone)
+        assertNotNull(millis)
+        assertEquals("2026-11-15", MoneyUtils.epochMillisToIsoDate(millis!!, cairoZone))
+        assertEquals("2026-11", MoneyUtils.yearMonthFromMillis(millis, cairoZone))
+        assertEquals("2026-10", MoneyUtils.previousYearMonth("2026-11"))
+        assertEquals("2025-12", MoneyUtils.previousYearMonth("2026-01"))
+
+        val (novStart, novEnd) = MoneyUtils.monthDateRange("2026-11", cairoZone)
+        assertEquals("2026-11-01", MoneyUtils.epochMillisToIsoDate(novStart, cairoZone))
+        assertEquals("2026-11-30", MoneyUtils.epochMillisToIsoDate(novEnd, cairoZone))
+        assertTrue(novEnd > novStart)
+
+        val dayStart = MoneyUtils.startOfDayMillis(millis, cairoZone)
+        val dayEnd = MoneyUtils.endOfDayMillis(millis, cairoZone)
+        assertEquals(86_399_999L, dayEnd - dayStart)
+
+        // Strict calendar validation: Feb 30, non-leap Feb 29, and month 13 must return null, while leap-year 2024-02-29 succeeds
+        assertNull(MoneyUtils.isoDateToEpochMillis("2026-02-30", cairoZone))
+        assertNull(MoneyUtils.isoDateToEpochMillis("2025-02-29", cairoZone))
+        assertNull(MoneyUtils.isoDateToEpochMillis("2026-13-01", cairoZone))
+        val leapDayMillis = MoneyUtils.isoDateToEpochMillis("2024-02-29", cairoZone)
+        assertNotNull(leapDayMillis)
+        assertEquals("2024-02-29", MoneyUtils.epochMillisToIsoDate(leapDayMillis!!, cairoZone))
+        val (leapFebStart, leapFebEnd) = MoneyUtils.monthDateRange("2024-02", cairoZone)
+        assertEquals("2024-02-01", MoneyUtils.epochMillisToIsoDate(leapFebStart, cairoZone))
+        assertEquals("2024-02-29", MoneyUtils.epochMillisToIsoDate(leapFebEnd, cairoZone))
+
+        // Verify no date shift across different local timezones and Arabic numeral ISO dates
+        for (zoneId in listOf(ZoneId.of("Africa/Cairo"), ZoneId.of("Asia/Riyadh"), ZoneId.of("UTC"))) {
+            val arabicIsoMillis = MoneyUtils.isoDateToEpochMillis("٢٠٢٦-١١-٠١", zoneId)
+            assertNotNull(arabicIsoMillis)
+            assertEquals("2026-11-01", MoneyUtils.epochMillisToIsoDate(arabicIsoMillis!!, zoneId))
+        }
     }
 }
