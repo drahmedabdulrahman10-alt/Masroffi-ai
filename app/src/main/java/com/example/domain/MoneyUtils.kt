@@ -402,6 +402,31 @@ object MoneyUtils {
             .toEpochMilli()
     }
 
+    /**
+     * Normalizes a custom date range when one boundary is updated so startIsoDate is never
+     * later than endIsoDate. If both are valid ISO dates and start > end:
+     * - When updating start (isStartUpdated = true), endIsoDate is adjusted to startIsoDate.
+     * - When updating end (isStartUpdated = false), startIsoDate is adjusted to endIsoDate.
+     */
+    fun normalizeDateRangeBounds(
+        startIsoDate: String,
+        endIsoDate: String,
+        isStartUpdated: Boolean
+    ): Pair<String, String> {
+        val startLocal = parseIsoLocalDate(startIsoDate)
+        val endLocal = parseIsoLocalDate(endIsoDate)
+        val normStart = startLocal?.let { formatLocalDateToIso(it) } ?: startIsoDate
+        val normEnd = endLocal?.let { formatLocalDateToIso(it) } ?: endIsoDate
+        if (startLocal != null && endLocal != null && startLocal.isAfter(endLocal)) {
+            return if (isStartUpdated) {
+                normStart to normStart
+            } else {
+                normEnd to normEnd
+            }
+        }
+        return normStart to normEnd
+    }
+
     fun monthDateRange(
         yearMonth: String,
         zoneId: ZoneId = ZoneId.systemDefault()

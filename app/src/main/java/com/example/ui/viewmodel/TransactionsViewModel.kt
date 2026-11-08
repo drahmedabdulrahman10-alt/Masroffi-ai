@@ -78,7 +78,18 @@ class TransactionsViewModel(
     )
 
     fun updateHistoryFilter(filter: TransactionHistoryFilter) {
-        historyFilterState.value = filter
+        val current = historyFilterState.value
+        val isStartUpdated = filter.startIsoDate != current.startIsoDate ||
+            filter.endIsoDate == current.endIsoDate
+        val (normStart, normEnd) = MoneyUtils.normalizeDateRangeBounds(
+            startIsoDate = filter.startIsoDate,
+            endIsoDate = filter.endIsoDate,
+            isStartUpdated = isStartUpdated
+        )
+        historyFilterState.value = filter.copy(
+            startIsoDate = normStart,
+            endIsoDate = normEnd
+        )
     }
 
     fun clearHistoryFilters() {

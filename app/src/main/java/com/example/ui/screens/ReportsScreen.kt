@@ -550,7 +550,14 @@ fun ReportsScreen(
         MasroofiCalendarDatePickerDialog(
             initialIsoDate = customStart.ifBlank { MoneyUtils.todayIsoDate() },
             onConfirmDate = { selectedIso ->
-                customStart = selectedIso
+                val (newStart, newEnd) = MoneyUtils.normalizeDateRangeBounds(
+                    startIsoDate = selectedIso,
+                    endIsoDate = customEnd,
+                    isStartUpdated = true
+                )
+                customStart = newStart
+                customEnd = newEnd
+                onSelectPeriodFilter(ReportPeriodFilter.CUSTOM, newStart, newEnd)
                 pickingCustomStartDate = false
             },
             onDismiss = { pickingCustomStartDate = false }
@@ -561,7 +568,14 @@ fun ReportsScreen(
         MasroofiCalendarDatePickerDialog(
             initialIsoDate = customEnd.ifBlank { MoneyUtils.todayIsoDate() },
             onConfirmDate = { selectedIso ->
-                customEnd = selectedIso
+                val (newStart, newEnd) = MoneyUtils.normalizeDateRangeBounds(
+                    startIsoDate = customStart,
+                    endIsoDate = selectedIso,
+                    isStartUpdated = false
+                )
+                customStart = newStart
+                customEnd = newEnd
+                onSelectPeriodFilter(ReportPeriodFilter.CUSTOM, newStart, newEnd)
                 pickingCustomEndDate = false
             },
             onDismiss = { pickingCustomEndDate = false }

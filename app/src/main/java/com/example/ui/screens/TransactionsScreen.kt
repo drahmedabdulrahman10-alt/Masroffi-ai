@@ -388,7 +388,12 @@ fun TransactionsScreen(
         MasroofiCalendarDatePickerDialog(
             initialIsoDate = filter.startIsoDate.ifBlank { MoneyUtils.todayIsoDate() },
             onConfirmDate = { selectedIso ->
-                onUpdateFilter(filter.copy(startIsoDate = selectedIso))
+                val (newStart, newEnd) = MoneyUtils.normalizeDateRangeBounds(
+                    startIsoDate = selectedIso,
+                    endIsoDate = filter.endIsoDate,
+                    isStartUpdated = true
+                )
+                onUpdateFilter(filter.copy(startIsoDate = newStart, endIsoDate = newEnd))
                 pickingStartFilterDate = false
             },
             onDismiss = { pickingStartFilterDate = false }
@@ -399,7 +404,12 @@ fun TransactionsScreen(
         MasroofiCalendarDatePickerDialog(
             initialIsoDate = filter.endIsoDate.ifBlank { MoneyUtils.todayIsoDate() },
             onConfirmDate = { selectedIso ->
-                onUpdateFilter(filter.copy(endIsoDate = selectedIso))
+                val (newStart, newEnd) = MoneyUtils.normalizeDateRangeBounds(
+                    startIsoDate = filter.startIsoDate,
+                    endIsoDate = selectedIso,
+                    isStartUpdated = false
+                )
+                onUpdateFilter(filter.copy(startIsoDate = newStart, endIsoDate = newEnd))
                 pickingEndFilterDate = false
             },
             onDismiss = { pickingEndFilterDate = false }

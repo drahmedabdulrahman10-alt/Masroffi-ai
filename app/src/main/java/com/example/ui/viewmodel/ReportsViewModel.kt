@@ -152,11 +152,19 @@ class ReportsViewModel(
         customStartIso: String = filterState.value.customReportStartIso,
         customEndIso: String = filterState.value.customReportEndIso
     ) {
+        val current = filterState.value
+        val isStartUpdated = customStartIso != current.customReportStartIso ||
+            customEndIso == current.customReportEndIso
+        val (normStart, normEnd) = MoneyUtils.normalizeDateRangeBounds(
+            startIsoDate = customStartIso,
+            endIsoDate = customEndIso,
+            isStartUpdated = isStartUpdated
+        )
         filterState.update {
             it.copy(
                 reportPeriodFilter = filter,
-                customReportStartIso = customStartIso,
-                customReportEndIso = customEndIso,
+                customReportStartIso = normStart,
+                customReportEndIso = normEnd,
                 selectedReportDrilldownCategoryId = null
             )
         }

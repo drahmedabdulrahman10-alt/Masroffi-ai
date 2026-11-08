@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -76,6 +77,10 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -1000,7 +1005,7 @@ fun MasroofiCalendarDatePickerDialog(
                                     displayedYearMonthStr = displayedYearMonth.minusYears(1).toString()
                                 },
                                 modifier = Modifier
-                                    .size(34.dp)
+                                    .size(40.dp)
                                     .testTag("calendar_prev_year_button")
                             ) {
                                 Icon(
@@ -1013,7 +1018,7 @@ fun MasroofiCalendarDatePickerDialog(
                                     displayedYearMonthStr = displayedYearMonth.minusMonths(1).toString()
                                 },
                                 modifier = Modifier
-                                    .size(34.dp)
+                                    .size(40.dp)
                                     .testTag("calendar_prev_month_button")
                             ) {
                                 Icon(
@@ -1039,7 +1044,7 @@ fun MasroofiCalendarDatePickerDialog(
                                     displayedYearMonthStr = displayedYearMonth.plusMonths(1).toString()
                                 },
                                 modifier = Modifier
-                                    .size(34.dp)
+                                    .size(40.dp)
                                     .testTag("calendar_next_month_button")
                             ) {
                                 Icon(
@@ -1052,7 +1057,7 @@ fun MasroofiCalendarDatePickerDialog(
                                     displayedYearMonthStr = displayedYearMonth.plusYears(1).toString()
                                 },
                                 modifier = Modifier
-                                    .size(34.dp)
+                                    .size(40.dp)
                                     .testTag("calendar_next_year_button")
                             ) {
                                 Icon(
@@ -1094,12 +1099,13 @@ fun MasroofiCalendarDatePickerDialog(
                                     Box(
                                         modifier = Modifier
                                             .weight(1f)
-                                            .height(32.dp)
+                                            .height(40.dp)
                                     )
                                 } else {
                                     val cellIso = MoneyUtils.formatLocalDateToIso(cellDate)
                                     val isSelected = cellDate == pendingLocalDate
                                     val isToday = cellDate == todayDate
+                                    val accessibleDayLabel = MoneyUtils.arabicDayMonthYearLabel(cellDate)
 
                                     val bgColor = when {
                                         isSelected -> MaterialTheme.colorScheme.primary
@@ -1125,11 +1131,16 @@ fun MasroofiCalendarDatePickerDialog(
                                         contentAlignment = Alignment.Center,
                                         modifier = Modifier
                                             .weight(1f)
-                                            .height(32.dp)
+                                            .heightIn(min = 40.dp)
+                                            .height(40.dp)
                                             .padding(1.dp)
                                             .clip(CircleShape)
                                             .background(bgColor)
                                             .then(borderModifier)
+                                            .semantics {
+                                                contentDescription = accessibleDayLabel
+                                                role = Role.Button
+                                            }
                                             .clickable {
                                                 pendingSelectedIso = cellIso
                                             }

@@ -1140,55 +1140,288 @@ class ExampleRobolectricTest {
         awaitMainLooperCondition {
             aiEntryVm.uiState.value.categories.isNotEmpty()
         }
+        val todayIso = MoneyUtils.todayIsoDate()
+        val yesterdayIso = MoneyUtils.resolveQuickDateIso(QuickDateOption.YESTERDAY)
 
-        // 1. When user has NOT manually selected a date, AI/parser-detected dates are preserved
-        aiEntryVm.updateAiInputText("اشتريت قهوة بـ 25 جنيه 2026-10-20\nطماطم 20")
+        // 1. Selecting Yesterday then selecting Today resets isDateManuallySelected to false (AUD-6.1-03)
+        aiEntryVm.selectAiTransactionDate(yesterdayIso)
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.selectedTransactionIsoDate == yesterdayIso
+        }
+        assertTrue(aiEntryVm.uiState.value.isDateManuallySelected)
+        assertEquals(yesterdayIso, aiEntryVm.uiState.value.selectedTransactionIsoDate)
+
+        aiEntryVm.selectAiTransactionDate(todayIso)
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.selectedTransactionIsoDate == todayIso
+        }
+        assertFalse(aiEntryVm.uiState.value.isDateManuallySelected)
+        assertEquals(todayIso, aiEntryVm.uiState.value.selectedTransactionIsoDate)
+
+        // 2. Batch date vs AI-detected date precedence (AUD-6.1-01):
+        // Select batch date "2026-10-15", then parse 3 lines:
+        // - Line 0 has explicit date "2026-10-20" (aiDetectedDate = true) -> MUST keep "2026-10-20"
+        // - Line 1 has no date -> inherits batch default "2026-10-15" with userModifiedDate = false
+        // - Line 2 has no date -> inherits batch default "2026-10-15" with userModifiedDate = false
+        aiEntryVm.selectAiTransactionDate("2026-10-15")
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.selectedTransactionIsoDate == "2026-10-15"
+        }
+        assertTrue(aiEntryVm.uiState.value.isDateManuallySelected)
+
+        aiEntryVm.updateAiInputText("اشتريت قهوة بـ 25 جنيه 2026-10-20\nطماطم 20\nخبز 10")
         aiEntryVm.analyzeAiInput(useLocalParserOnly = true)
         awaitMainLooperCondition {
             aiEntryVm.uiState.value.aiParseResult != null
         }
 
         val initialProposals = aiEntryVm.uiState.value.aiParseResult!!.proposals
-        assertEquals(2, initialProposals.size)
+        assertEquals(3, initialProposals.size)
         assertEquals("2026-10-20", initialProposals[0].isoDate)
         assertTrue(initialProposals[0].aiDetectedDate)
-        assertEquals(MoneyUtils.todayIsoDate(), initialProposals[1].isoDate)
-        assertFalse(initialProposals[1].aiDetectedDate)
+        assertFalse(initialProposals[0].userModifiedDate)
 
-        // 2. User manually overrides the second draft's date -> userModifiedDate becomes true and takes precedence
+        assertEquals("2026-10-15", initialProposals[1].isoDate)
+        assertFalse(initialProposals[1].aiDetectedDate)
+        assertFalse(initialProposals[1].userModifiedDate)
+
+        assertEquals("2026-10-15", initialProposals[2].isoDate)
+        assertFalse(initialProposals[2].aiDetectedDate)
+        assertFalse(initialProposals[2].userModifiedDate)
+
+        // 3. Individual draft manual override vs later batch date change (AUD-6.1-01):
+        // User manually overrides draft[1] ("طماطم") to "2026-10-18" -> userModifiedDate = true
         val secondDraft = initialProposals[1]
         aiEntryVm.updateProposedDraft(secondDraft.copy(isoDate = "2026-10-18"))
         awaitMainLooperCondition {
             aiEntryVm.uiState.value.aiParseResult?.proposals?.get(1)?.isoDate == "2026-10-18"
         }
         assertTrue(aiEntryVm.uiState.value.aiParseResult!!.proposals[1].userModifiedDate)
+        assertFalse(aiEntryVm.uiState.value.aiParseResult!!.proposals[2].userModifiedDate)
 
-        // Re-analyzing the same input must NOT overwrite the user's manual date override on draft[1]
-        aiEntryVm.analyzeAiInput(useLocalParserOnly = true)
-        awaitMainLooperCondition {
-            aiEntryVm.uiState.value.aiParseResult != null && !aiEntryVm.uiState.value.isAiParsing
-        }
-        val reanalyzedProposals = aiEntryVm.uiState.value.aiParseResult!!.proposals
-        assertEquals("2026-10-20", reanalyzedProposals[0].isoDate)
-        assertEquals("2026-10-18", reanalyzedProposals[1].isoDate)
-        assertTrue(reanalyzedProposals[1].userModifiedDate)
-
-        // 3. Selecting a batch manual date via selectAiTransactionDate updates proposals and takes precedence over AI
+        // Changing batch date after parsing to "2026-10-12" must update ONLY draft[2] ("خبز"),
+        // while preserving draft[0] ("2026-10-20" AI-detected) and draft[1] ("2026-10-18" user-modified)!
         aiEntryVm.selectAiTransactionDate("2026-10-12")
         awaitMainLooperCondition {
-            aiEntryVm.uiState.value.selectedTransactionIsoDate == "2026-10-12" &&
-                aiEntryVm.uiState.value.isDateManuallySelected
+            aiEntryVm.uiState.value.selectedTransactionIsoDate == "2026-10-12"
         }
-        assertTrue(aiEntryVm.uiState.value.aiParseResult!!.proposals.all { it.isoDate == "2026-10-12" })
+        val afterBatchChange = aiEntryVm.uiState.value.aiParseResult!!.proposals
+        assertEquals("2026-10-20", afterBatchChange[0].isoDate)
+        assertEquals("2026-10-18", afterBatchChange[1].isoDate)
+        assertTrue(afterBatchChange[1].userModifiedDate)
+        assertEquals("2026-10-12", afterBatchChange[2].isoDate)
+        assertFalse(afterBatchChange[2].userModifiedDate)
 
-        // Save all reviewed proposals and verify persisted transactionDate in Room
+        // Save all reviewed proposals and verify exact persisted transactionDate values in Room
         aiEntryVm.saveAllReviewedProposals()
         awaitMainLooperCondition {
             aiEntryVm.uiState.value.aiParseResult == null
         }
+        // After save, batch date and manual flag are reset to Today / false
+        assertEquals(todayIso, aiEntryVm.uiState.value.selectedTransactionIsoDate)
+        assertFalse(aiEntryVm.uiState.value.isDateManuallySelected)
 
-        val savedTxs = runBlocking { database.dao().getAllTransactions() }
-        assertEquals(2, savedTxs.size)
-        assertTrue(savedTxs.all { MoneyUtils.epochMillisToIsoDate(it.transactionDate) == "2026-10-12" })
+        val savedTxs = runBlocking { database.dao().getAllTransactions() }.associateBy { it.description }
+        assertEquals(3, savedTxs.size)
+        assertEquals("2026-10-20", MoneyUtils.epochMillisToIsoDate(savedTxs.getValue("قهوة").transactionDate))
+        assertEquals("2026-10-18", MoneyUtils.epochMillisToIsoDate(savedTxs.getValue("طماطم").transactionDate))
+        assertEquals("2026-10-12", MoneyUtils.epochMillisToIsoDate(savedTxs.getValue("خبز").transactionDate))
+    }
+
+    @Test
+    fun `AI safe date inheritance across successive parses handles changed descriptions, reordered items, duplicate descriptions, changed amounts, and cancel reset (AUD-6_1-02)`() {
+        val container = createTestAppContainer(
+            defaultDispatcher = Dispatchers.Main,
+            ioDispatcher = Dispatchers.Main
+        )
+        val aiEntryVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[AiEntryViewModel::class.java]
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.categories.isNotEmpty()
+        }
+        val todayIso = MoneyUtils.todayIsoDate()
+
+        // 1. Parse two transactions and manually modify draft[0] ("طماطم") to "2026-10-18"
+        aiEntryVm.updateAiInputText("طماطم 20\nجبنة 45")
+        aiEntryVm.analyzeAiInput(useLocalParserOnly = true)
+        awaitMainLooperCondition { aiEntryVm.uiState.value.aiParseResult != null }
+
+        val firstDraft = aiEntryVm.uiState.value.aiParseResult!!.proposals[0]
+        aiEntryVm.updateProposedDraft(firstDraft.copy(isoDate = "2026-10-18"))
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult?.proposals?.get(0)?.isoDate == "2026-10-18"
+        }
+
+        // 2. Re-parse with REORDERED transactions and CHANGED AMOUNT ("جبنة 45\nطماطم 35"):
+        // "طماطم" moved from index 0 to index 1 and changed amount 20 -> 35, yet keeps "2026-10-18",
+        // while "جبنة" at index 0 must NOT inherit "2026-10-18"!
+        aiEntryVm.updateAiInputText("جبنة 45\nطماطم 35")
+        aiEntryVm.analyzeAiInput(useLocalParserOnly = true)
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult != null && !aiEntryVm.uiState.value.isAiParsing
+        }
+        val reordered = aiEntryVm.uiState.value.aiParseResult!!.proposals
+        assertEquals(2, reordered.size)
+        assertEquals("جبنة", reordered[0].description)
+        assertEquals(todayIso, reordered[0].isoDate)
+        assertFalse(reordered[0].userModifiedDate)
+
+        assertEquals("طماطم", reordered[1].description)
+        assertEquals(3500L, reordered[1].amountMinorUnits)
+        assertEquals("2026-10-18", reordered[1].isoDate)
+        assertTrue(reordered[1].userModifiedDate)
+
+        // 3. Re-parse a DIFFERENT transaction at the same index ("تاكسي 50\nأوبر 80"):
+        // Neither "تاكسي" nor "أوبر" may inherit "طماطم"'s manual date!
+        aiEntryVm.updateAiInputText("تاكسي 50\nأوبر 80")
+        aiEntryVm.analyzeAiInput(useLocalParserOnly = true)
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult != null && !aiEntryVm.uiState.value.isAiParsing
+        }
+        val unrelated = aiEntryVm.uiState.value.aiParseResult!!.proposals
+        assertEquals(2, unrelated.size)
+        assertTrue(unrelated.all { it.isoDate == todayIso && !it.userModifiedDate })
+
+        // 4. Duplicate descriptions: "قهوة 25\nقهوة 40" where ONLY the second "قهوة" is manually modified
+        aiEntryVm.updateAiInputText("قهوة 25\nقهوة 40")
+        aiEntryVm.analyzeAiInput(useLocalParserOnly = true)
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult != null && !aiEntryVm.uiState.value.isAiParsing
+        }
+        val dupInitial = aiEntryVm.uiState.value.aiParseResult!!.proposals
+        assertEquals(2, dupInitial.size)
+        aiEntryVm.updateProposedDraft(dupInitial[1].copy(isoDate = "2026-10-19"))
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult?.proposals?.get(1)?.isoDate == "2026-10-19"
+        }
+
+        // Re-parsing "قهوة 25\nقهوة 40" must keep draft[0] at Today and draft[1] at "2026-10-19"
+        aiEntryVm.analyzeAiInput(useLocalParserOnly = true)
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult != null && !aiEntryVm.uiState.value.isAiParsing
+        }
+        val dupReanalyzed = aiEntryVm.uiState.value.aiParseResult!!.proposals
+        assertEquals(todayIso, dupReanalyzed[0].isoDate)
+        assertFalse(dupReanalyzed[0].userModifiedDate)
+        assertEquals("2026-10-19", dupReanalyzed[1].isoDate)
+        assertTrue(dupReanalyzed[1].userModifiedDate)
+
+        // 5. Canceling batch resets batch date, manual flag, and proposals
+        aiEntryVm.selectAiTransactionDate("2026-10-11")
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.selectedTransactionIsoDate == "2026-10-11"
+        }
+        assertTrue(aiEntryVm.uiState.value.isDateManuallySelected)
+        aiEntryVm.cancelAiReview()
+        awaitMainLooperCondition {
+            aiEntryVm.uiState.value.aiParseResult == null
+        }
+        assertNull(aiEntryVm.uiState.value.aiParseResult)
+        assertEquals(todayIso, aiEntryVm.uiState.value.selectedTransactionIsoDate)
+        assertFalse(aiEntryVm.uiState.value.isDateManuallySelected)
+    }
+
+    @Test
+    fun `TransactionsViewModel and ReportsViewModel unify reversed custom date ranges and preserve inclusive day boundaries (AUD-6_1-04)`() {
+        val container = createTestAppContainer(
+            defaultDispatcher = Dispatchers.Main,
+            ioDispatcher = Dispatchers.Main
+        )
+        val transactionsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[TransactionsViewModel::class.java]
+        val reportsVm = ViewModelProvider(viewModelStore, container.viewModelFactory)[ReportsViewModel::class.java]
+
+        // Seed transactions on 2026-11-10 (start of day) and 2026-11-20 (end of day 23:59:59.999)
+        val nov10Start = MoneyUtils.startOfDayMillis(MoneyUtils.isoDateToEpochMillis("2026-11-10")!!)
+        val nov20End = MoneyUtils.endOfDayMillis(MoneyUtils.isoDateToEpochMillis("2026-11-20")!!)
+        runBlocking {
+            repository.saveManualTransaction(
+                description = "معاملة 10 نوفمبر",
+                amountMinorUnits = 5000L,
+                currencyCode = "EGP",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_FOOD,
+                transactionDate = nov10Start,
+                notes = ""
+            )
+            repository.saveManualTransaction(
+                description = "معاملة 20 نوفمبر",
+                amountMinorUnits = 8000L,
+                currencyCode = "EGP",
+                type = TransactionType.EXPENSE,
+                categoryId = DefaultCategories.CAT_FOOD,
+                transactionDate = nov20End,
+                notes = ""
+            )
+        }
+        awaitMainLooperCondition {
+            transactionsVm.uiState.value.allTransactions.size == 2
+        }
+
+        // 1. Inclusive range [2026-11-10 .. 2026-11-20] includes both boundary transactions in both ViewModels
+        transactionsVm.updateHistoryFilter(
+            TransactionHistoryFilter(startIsoDate = "2026-11-10", endIsoDate = "2026-11-20")
+        )
+        reportsVm.setReportPeriodFilter(ReportPeriodFilter.CUSTOM, "2026-11-10", "2026-11-20")
+        awaitMainLooperCondition {
+            transactionsVm.uiState.value.filteredHistoryTransactions.size == 2 &&
+                reportsVm.uiState.value.reportPeriodTransactions.size == 2
+        }
+        assertEquals(13_000L, reportsVm.uiState.value.reportSummary.periodExpenseMinor)
+
+        // 2. Updating start date to "2026-11-20" ( matches end ) and then to a reversed range:
+        // First set range to [2026-11-10 .. 2026-11-15], then update start to "2026-11-20" (> "2026-11-15")
+        transactionsVm.updateHistoryFilter(
+            TransactionHistoryFilter(startIsoDate = "2026-11-10", endIsoDate = "2026-11-15")
+        )
+        reportsVm.setReportPeriodFilter(ReportPeriodFilter.CUSTOM, "2026-11-10", "2026-11-15")
+        awaitMainLooperCondition {
+            transactionsVm.uiState.value.historyFilter.endIsoDate == "2026-11-15" &&
+                reportsVm.uiState.value.customReportEndIso == "2026-11-15"
+        }
+
+        // Now user updates startIsoDate to "2026-11-20" (later than "2026-11-15") ->
+        // Both ViewModels automatically adjust endIsoDate to "2026-11-20" and return the 2026-11-20 transaction!
+        transactionsVm.updateHistoryFilter(
+            transactionsVm.uiState.value.historyFilter.copy(startIsoDate = "2026-11-20")
+        )
+        reportsVm.setReportPeriodFilter(
+            ReportPeriodFilter.CUSTOM,
+            customStartIso = "2026-11-20",
+            customEndIso = reportsVm.uiState.value.customReportEndIso
+        )
+        awaitMainLooperCondition {
+            transactionsVm.uiState.value.historyFilter.endIsoDate == "2026-11-20" &&
+                reportsVm.uiState.value.customReportEndIso == "2026-11-20"
+        }
+        assertEquals("2026-11-20", transactionsVm.uiState.value.historyFilter.startIsoDate)
+        assertEquals("2026-11-20", transactionsVm.uiState.value.historyFilter.endIsoDate)
+        assertEquals("2026-11-20", reportsVm.uiState.value.customReportStartIso)
+        assertEquals("2026-11-20", reportsVm.uiState.value.customReportEndIso)
+        assertEquals(1, transactionsVm.uiState.value.filteredHistoryTransactions.size)
+        assertEquals(1, reportsVm.uiState.value.reportPeriodTransactions.size)
+        assertEquals("معاملة 20 نوفمبر", transactionsVm.uiState.value.filteredHistoryTransactions.first().description)
+        assertEquals("معاملة 20 نوفمبر", reportsVm.uiState.value.reportPeriodTransactions.first().description)
+
+        // 3. Updating endIsoDate to "2026-11-10" (earlier than "2026-11-20") ->
+        // Both ViewModels automatically adjust startIsoDate to "2026-11-10" and return the 2026-11-10 transaction!
+        transactionsVm.updateHistoryFilter(
+            transactionsVm.uiState.value.historyFilter.copy(endIsoDate = "2026-11-10")
+        )
+        reportsVm.setReportPeriodFilter(
+            ReportPeriodFilter.CUSTOM,
+            customStartIso = reportsVm.uiState.value.customReportStartIso,
+            customEndIso = "2026-11-10"
+        )
+        awaitMainLooperCondition {
+            transactionsVm.uiState.value.historyFilter.startIsoDate == "2026-11-10" &&
+                reportsVm.uiState.value.customReportStartIso == "2026-11-10"
+        }
+        assertEquals("2026-11-10", transactionsVm.uiState.value.historyFilter.startIsoDate)
+        assertEquals("2026-11-10", transactionsVm.uiState.value.historyFilter.endIsoDate)
+        assertEquals("2026-11-10", reportsVm.uiState.value.customReportStartIso)
+        assertEquals("2026-11-10", reportsVm.uiState.value.customReportEndIso)
+        assertEquals(1, transactionsVm.uiState.value.filteredHistoryTransactions.size)
+        assertEquals(1, reportsVm.uiState.value.reportPeriodTransactions.size)
+        assertEquals("معاملة 10 نوفمبر", transactionsVm.uiState.value.filteredHistoryTransactions.first().description)
+        assertEquals("معاملة 10 نوفمبر", reportsVm.uiState.value.reportPeriodTransactions.first().description)
     }
 }

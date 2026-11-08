@@ -80,23 +80,39 @@ class AiEntryViewModel(
     }
 
     /**
-     * Allows the user to explicitly select a transaction date for AI entry (e.g. Today, Yesterday,
-     * Day Before Yesterday, or from the Calendar Date Picker). A manually selected date takes
-     * precedence over AI-parsed or default dates and is never overwritten by AI.
+     * Allows the user to select a batch-level default transaction date for AI entry (e.g. Today,
+     * Yesterday, Day Before Yesterday, or from the Calendar Date Picker).
+     *
+     * Three-tier date precedence (AUD-6.1-01 & AUD-6.1-03):
+     * 1. User-modified individual draft date (userModifiedDate == true) — highest precedence;
+     *    never overwritten by batch date changes.
+     * 2. Explicit AI/parser-detected date in transaction text (aiDetectedDate == true) — preserved
+     *    over batch-level default dates.
+     * 3. Batch-level default date (selectedTransactionIsoDate) — applied to eligible drafts that
+     *    have neither an explicit AI-detected date nor an individual user date override.
+     *
+     * Selecting Today resets isDateManuallySelected to false so the user can predictably return
+     * to automatic date interpretation.
      */
     fun selectAiTransactionDate(isoDate: String) {
-        val normalizedIso = MoneyUtils.parseIsoLocalDate(isoDate)?.let {
+        val parsedLocal = MoneyUtils.parseIsoLocalDate(isoDate)
+        val normalizedIso = parsedLocal?.let {
             MoneyUtils.formatLocalDateToIso(it)
         } ?: MoneyUtils.normalizeDigits(isoDate.trim())
+        val isManualBatch = parsedLocal != null && normalizedIso != MoneyUtils.todayIsoDate()
 
         localAiState.update { state ->
             val updatedParseResult = state.aiParseResult?.let { currentResult ->
-                if (MoneyUtils.isoDateToEpochMillis(normalizedIso) != null) {
+                if (parsedLocal != null) {
                     val updatedProposals = currentResult.proposals.map { draft ->
-                        draft.copy(
-                            isoDate = normalizedIso,
-                            userModifiedDate = true
-                        )
+                        if (!draft.userModifiedDate && !draft.aiDetectedDate) {
+                            draft.copy(
+                                isoDate = normalizedIso,
+                                userModifiedDate = false
+                            )
+                        } else {
+                            draft
+                        }
                     }
                     currentResult.copy(proposals = updatedProposals)
                 } else {
@@ -105,7 +121,7 @@ class AiEntryViewModel(
             }
             state.copy(
                 selectedTransactionIsoDate = normalizedIso,
-                isDateManuallySelected = true,
+                isDateManuallySelected = isManualBatch,
                 aiParseResult = updatedParseResult,
                 aiErrorMessage = null
             )
@@ -233,23 +249,47 @@ class AiEntryViewModel(
         if (manualBatchDate == null && previousProposals.none { it.userModifiedDate }) {
             return parseResult
         }
+
+        // Maintain a consumable pool of previous proposals so each previous draft is matched at most once.
+        // Never inherit a date solely by list index (AUD-6.1-02): require matching normalized description and type.
+        val availablePrevious = previousProposals.toMutableList()
+
         val mergedProposals = parseResult.proposals.mapIndexed { index, draft ->
-            val previousManualDraft = previousProposals.getOrNull(index)?.takeIf {
+            val draftDesc = draft.description.trim()
+            val positionalCandidate = previousProposals.getOrNull(index)?.takeIf { candidate ->
+                availablePrevious.contains(candidate) &&
+                    candidate.description.trim().equals(draftDesc, ignoreCase = true) &&
+                    candidate.type == draft.type
+            }
+
+            val matchedPrevious = positionalCandidate?.takeIf {
+                it.amountMinorUnits == draft.amountMinorUnits
+            } ?: availablePrevious.firstOrNull { candidate ->
+                candidate.description.trim().equals(draftDesc, ignoreCase = true) &&
+                    candidate.type == draft.type &&
+                    candidate.amountMinorUnits == draft.amountMinorUnits
+            } ?: positionalCandidate ?: availablePrevious.firstOrNull { candidate ->
+                candidate.description.trim().equals(draftDesc, ignoreCase = true) &&
+                    candidate.type == draft.type
+            }
+
+            if (matchedPrevious != null) {
+                availablePrevious.remove(matchedPrevious)
+            }
+
+            val validManualOverride = matchedPrevious?.takeIf {
                 it.userModifiedDate && MoneyUtils.isoDateToEpochMillis(it.isoDate) != null
-            } ?: previousProposals.firstOrNull {
-                it.userModifiedDate &&
-                    it.description.equals(draft.description, ignoreCase = true) &&
-                    MoneyUtils.isoDateToEpochMillis(it.isoDate) != null
             }
 
             when {
-                previousManualDraft != null -> draft.copy(
-                    isoDate = previousManualDraft.isoDate,
+                validManualOverride != null -> draft.copy(
+                    isoDate = validManualOverride.isoDate,
                     userModifiedDate = true
                 )
+                draft.aiDetectedDate -> draft
                 manualBatchDate != null -> draft.copy(
                     isoDate = manualBatchDate,
-                    userModifiedDate = true
+                    userModifiedDate = false
                 )
                 else -> draft
             }

@@ -1041,4 +1041,39 @@ class ExampleUnitTest {
         assertEquals("2026-11-01", validated.proposals[1].isoDate)
         assertFalse(validated.proposals[1].aiDetectedDate)
     }
+
+    @Test
+    fun `normalizeDateRangeBounds adjusts opposite boundary consistently when start is after end (AUD-6_1-04)`() {
+        // 1. Valid range (start <= end) remains unchanged
+        assertEquals(
+            "2026-11-05" to "2026-11-20",
+            MoneyUtils.normalizeDateRangeBounds("2026-11-05", "2026-11-20", isStartUpdated = true)
+        )
+        assertEquals(
+            "2026-11-10" to "2026-11-10",
+            MoneyUtils.normalizeDateRangeBounds("2026-11-10", "2026-11-10", isStartUpdated = false)
+        )
+
+        // 2. Selecting start date later than current end date adjusts end date to match start date
+        assertEquals(
+            "2026-11-25" to "2026-11-25",
+            MoneyUtils.normalizeDateRangeBounds("2026-11-25", "2026-11-10", isStartUpdated = true)
+        )
+
+        // 3. Selecting end date earlier than current start date adjusts start date to match end date
+        assertEquals(
+            "2026-11-03" to "2026-11-03",
+            MoneyUtils.normalizeDateRangeBounds("2026-11-15", "2026-11-03", isStartUpdated = false)
+        )
+
+        // 4. Open-ended / partial bounds remain intact
+        assertEquals(
+            "2026-11-15" to "",
+            MoneyUtils.normalizeDateRangeBounds("2026-11-15", "", isStartUpdated = true)
+        )
+        assertEquals(
+            "" to "2026-11-15",
+            MoneyUtils.normalizeDateRangeBounds("", "2026-11-15", isStartUpdated = false)
+        )
+    }
 }
